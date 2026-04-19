@@ -5,7 +5,7 @@ import config
 from src import state
 from src.drips.models import DripsIssue
 from src.github.client import GitHubClient
-from src.docker.manager import DockerManager, clone_repo, detect_language, push_and_commit
+from src.docker.manager import NativeRunner, clone_repo, detect_language, push_and_commit
 from src.solver.agent import IssueSolver
 
 logger = logging.getLogger(__name__)
@@ -23,7 +23,6 @@ def run_pipeline(issue: DripsIssue) -> str:
     state.log(iid, f"Pipeline started for {iid}")
 
     gh = GitHubClient()
-    docker = DockerManager()
     repo_path = Path(config.WORKDIR) / f"{issue.repo_owner}_{issue.repo_name}_{issue.issue_number}"
 
     try:
@@ -34,7 +33,7 @@ def run_pipeline(issue: DripsIssue) -> str:
         issue.description = details["body"]
         issue.labels = details["labels"]
         state.upsert_issue(iid, title=issue.title)
-        state.log(iid, f"Issue title: {issue.title}")
+        state.log(iid, f"Issue: {issue.title}")
 
         # 2. Fork
         _step(iid, "forking", f"Forking {issue.repo_owner}/{issue.repo_name}...")
@@ -44,29 +43,26 @@ def run_pipeline(issue: DripsIssue) -> str:
 
         # 3. Clone
         branch_name = gh.make_branch_name(issue.issue_number, issue.title)
-        _step(iid, "cloning", f"Cloning fork to local workspace (branch: {branch_name})...")
-        clone_url = gh.get_authenticated_clone_url(forked_repo)
-        clone_repo(clone_url, repo_path, branch=branch_name)
+        _step(iid, "cloning", f"Cloning fork (branch: {branch_name})...")
+        clone_repo(gh.get_authenticated_clone_url(forked_repo), repo_path, branch=branch_name)
         state.log(iid, "Clone complete")
 
-        # 4. Docker setup
+        # 4. Setup environment natively
         language = detect_language(repo_path)
-        _step(iid, "setup", f"Detected language: {language}. Spinning up Docker container...")
-        container = docker.create_workspace(repo_path, language)
-        state.log(iid, f"Container started: {container.short_id}")
-        docker.setup_environment(container, language)
-        state.log(iid, "Environment ready")
+        _step(iid, "setup", f"Detected language: {language}. Installing dependencies...")
+        runner = NativeRunner(repo_path)
+        runner.setup(language)
+        state.log(iid, "Dependencies installed")
 
         # 5. Claude solver
         _step(iid, "solving", "Claude is analyzing the issue and writing the fix...")
-        solver = IssueSolver(docker, container, repo_path)
+        solver = IssueSolver(runner, repo_path)
         fix_summary = solver.solve(issue.title, issue.description)
         state.log(iid, f"Fix complete: {fix_summary}")
 
         # 6. Push
-        _step(iid, "pushing", "Committing changes and pushing branch...")
-        commit_msg = f"fix: resolve issue #{issue.issue_number} - {issue.title}"
-        push_and_commit(repo_path, branch_name, commit_msg)
+        _step(iid, "pushing", "Committing and pushing branch...")
+        push_and_commit(repo_path, branch_name, f"fix: resolve issue #{issue.issue_number} - {issue.title}")
         state.log(iid, "Branch pushed")
 
         # 7. PR
@@ -79,7 +75,6 @@ def run_pipeline(issue: DripsIssue) -> str:
             issue_title=issue.title,
             fix_summary=fix_summary,
         )
-
         state.upsert_issue(iid, step="done", pr_url=pr_url)
         state.log(iid, f"PR created: {pr_url}")
         return pr_url
@@ -88,6 +83,3 @@ def run_pipeline(issue: DripsIssue) -> str:
         state.upsert_issue(iid, failed=True, error=str(exc))
         state.log(iid, f"ERROR: {exc}")
         raise
-
-    finally:
-        docker.cleanup_all()

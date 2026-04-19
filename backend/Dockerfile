@@ -1,8 +1,7 @@
 FROM python:3.12-slim
 
-# Install Docker CLI + git (Docker daemon comes from the host via socket mount)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    docker.io git curl ca-certificates \
+    git curl ca-certificates nodejs npm \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
