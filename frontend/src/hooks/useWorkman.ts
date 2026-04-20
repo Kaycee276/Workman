@@ -15,6 +15,7 @@ export function useWorkman() {
   const [connected, setConnected] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
   const retryRef = useRef<ReturnType<typeof setTimeout>>(undefined);
+  const heartbeatRef = useRef<ReturnType<typeof setInterval>>(undefined);
   const connectRef = useRef<() => void>(() => {});
 
   const connect = useCallback(() => {
@@ -23,9 +24,16 @@ export function useWorkman() {
     const ws = new WebSocket(WS_URL);
     wsRef.current = ws;
 
-    ws.onopen = () => setConnected(true);
+    ws.onopen = () => {
+      setConnected(true);
+      // Render's proxy drops idle connections after ~55s — ping every 30s
+      heartbeatRef.current = setInterval(() => {
+        if (ws.readyState === WebSocket.OPEN) ws.send("ping");
+      }, 30000);
+    };
     ws.onclose = () => {
       setConnected(false);
+      clearInterval(heartbeatRef.current);
       retryRef.current = setTimeout(() => connectRef.current(), 3000);
     };
     ws.onerror = () => ws.close();
@@ -51,6 +59,7 @@ export function useWorkman() {
     connect();
     return () => {
       clearTimeout(retryRef.current);
+      clearInterval(heartbeatRef.current);
       wsRef.current?.close();
     };
   }, [connect]);
