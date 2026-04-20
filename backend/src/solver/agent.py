@@ -99,6 +99,15 @@ Rules:
 - If there are no tests, at least verify the code runs without errors
 - Write clean, idiomatic code matching the project's style
 - Do not add comments unless the logic is genuinely non-obvious
+
+Handling unavailable toolchains:
+- If dependency installation failed (e.g. node_modules missing, cargo not found),
+  do not waste iterations trying to run compiler or test commands that require them.
+  Make your best fix to the source code based on reading and understanding it, then
+  call `finish` with an honest note that local verification was skipped due to a
+  missing toolchain.
+- Be decisive: if you have read the relevant code, understood the issue, and written
+  a fix — call `finish`. Do not loop trying the same failing command repeatedly.
 """
 
 
@@ -108,10 +117,19 @@ class IssueSolver:
         self.runner = runner
         self.repo_path = repo_path
 
-    def solve(self, issue_title: str, issue_body: str) -> str:
+    def solve(self, issue_title: str, issue_body: str, setup_warnings: list[str] | None = None) -> str:
+        setup_section = ""
+        if setup_warnings:
+            joined = "\n".join(f"- {w}" for w in setup_warnings)
+            setup_section = (
+                f"\n\n**Setup warnings (dependency installation had issues):**\n{joined}\n"
+                "Some build tools may be unavailable. Fix the source code directly "
+                "and skip compilation checks if they fail."
+            )
         user_message = (
             f"# Issue: {issue_title}\n\n"
-            f"{issue_body}\n\n"
+            f"{issue_body}"
+            f"{setup_section}\n\n"
             "Please fix this issue. Start by exploring the repository structure."
         )
         messages: list[dict] = [{"role": "user", "content": user_message}]

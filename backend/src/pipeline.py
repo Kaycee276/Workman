@@ -51,13 +51,16 @@ def run_pipeline(issue: DripsIssue) -> str:
         language = detect_language(repo_path)
         _step(iid, "setup", f"Detected language: {language}. Installing dependencies...")
         runner = NativeRunner(repo_path)
-        runner.setup(language)
-        state.log(iid, "Dependencies installed")
+        setup_warnings = runner.setup(language)
+        if setup_warnings:
+            state.log(iid, f"Setup warnings: {'; '.join(setup_warnings)}")
+        else:
+            state.log(iid, "Dependencies installed")
 
         # 5. Claude solver
         _step(iid, "solving", "Claude is analyzing the issue and writing the fix...")
         solver = IssueSolver(runner, repo_path)
-        fix_summary = solver.solve(issue.title, issue.description)
+        fix_summary = solver.solve(issue.title, issue.description, setup_warnings=setup_warnings)
         state.log(iid, f"Fix complete: {fix_summary}")
 
         # 6. Push

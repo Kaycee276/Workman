@@ -18,6 +18,10 @@ WORKDIR = os.getenv("WORKDIR", str(Path(__file__).parent / "work"))
 # e.g. "stellar,drips-network" — leave empty to watch all orgs (use with care).
 WATCH_ORGS = os.getenv("WATCH_ORGS", "")
 
+# Label that must be present on an issue for it to be picked up.
+# e.g. "Stellar Wave" for Drips bounties. Leave empty to skip label filtering.
+WATCH_LABEL = os.getenv("WATCH_LABEL", "Stellar Wave")
+
 # Optional dashboard auth token. If set, WebSocket and /api/status require
 # ?token=<value>. Leave empty to disable auth (local / trusted environments only).
 DASHBOARD_TOKEN = os.getenv("DASHBOARD_TOKEN", "")
@@ -31,4 +35,4 @@ ALLOWED_ORIGINS = (
     else ["http://localhost:5173", "http://localhost:3000"]
 )
 
-MAX_SOLVER_ITERATIONS = 40
+MAX_SOLVER_ITERATIONS = 50

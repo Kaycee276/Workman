@@ -12,18 +12,25 @@
     linear-gradient(var(--cc), var(--cc)),
     linear-gradient(var(--cc), var(--cc)),
     linear-gradient(var(--cc), var(--cc)),
-    linear-gradient(var(--cc), var(--cc)),
-    linear-gradient(var(--cc), var(--cc));
+    linear-gradient(var(--cc), var(--cc)), linear-gradient(var(--cc), var(--cc));
   background-size:
-    14px 2px, 2px 14px,
-    14px 2px, 2px 14px,
-    14px 2px, 2px 14px,
-    14px 2px, 2px 14px;
+    14px 2px,
+    2px 14px,
+    14px 2px,
+    2px 14px,
+    14px 2px,
+    2px 14px,
+    14px 2px,
+    2px 14px;
   background-position:
-    0 0,       0 0,
-    100% 0,    100% 0,
-    0 100%,    0 100%,
-    100% 100%, 100% 100%;
+    0 0,
+    0 0,
+    100% 0,
+    100% 0,
+    0 100%,
+    0 100%,
+    100% 100%,
+    100% 100%;
   background-repeat: no-repeat;
 
   border-radius: 4px;
@@ -32,32 +39,84 @@
   transition: background-color 0.15s;
 }
 
-.card:hover  { background-color: #252525; }
-.selected    { background-color: #272727; }
-.queued      { --cc: var(--muted); }
-.failed      { --cc: var(--red); }
-.done        { --cc: var(--green); }
+.card:hover {
+  background-color: #252525;
+}
+.selected {
+  background-color: #272727;
+}
+.queued {
+  --cc: var(--muted);
+}
+.failed {
+  --cc: var(--red);
+}
+.done {
+  --cc: var(--green);
+}
 
-.issueId  { font-family: var(--font-header); font-size: 11px; font-weight: 600; color: var(--muted); margin-bottom: 4px; }
-.title    { font-family: var(--font-header); font-size: 13px; font-weight: 500; color: var(--text); margin-bottom: 10px; line-height: 1.4; word-break: break-word; }
+.issueId {
+  font-family: var(--font-header);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted);
+  margin-bottom: 4px;
+}
+.title {
+  font-family: var(--font-header);
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text);
+  margin-bottom: 10px;
+  line-height: 1.4;
+  word-break: break-word;
+}
 
-.steps    { display: flex; gap: 4px; align-items: center; flex-wrap: wrap; }
+.steps {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+  flex-wrap: wrap;
+}
 .dot {
-  width: 10px; height: 10px; border-radius: 50%;
+  width: 10px;
+  height: 10px;
   border: 1.5px solid var(--border);
   background: transparent;
   flex-shrink: 0;
 }
-.doneDot   { background: var(--green);  border-color: var(--green); }
-.activeDot { background: var(--yellow); border-color: var(--yellow); animation: pulse 1s infinite; }
-.failedDot { background: var(--red);    border-color: var(--red); }
-
-@keyframes pulse {
-  0%, 100% { opacity: 1; }
-  50%       { opacity: 0.35; }
+.doneDot {
+  background: var(--green);
+  border-color: var(--green);
+}
+.activeDot {
+  background: var(--yellow);
+  border-color: var(--yellow);
+  animation: pulse 1s infinite;
+}
+.failedDot {
+  background: var(--red);
+  border-color: var(--red);
 }
 
-.stepLabel { font-family: var(--font-header); font-size: 10px; font-weight: 600; letter-spacing: 0.5px; color: var(--muted); margin-top: 6px; }
+@keyframes pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+.stepLabel {
+  font-family: var(--font-header);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  color: var(--muted);
+  margin-top: 6px;
+}
 
 .prLink {
   display: inline-block;
@@ -68,7 +127,9 @@
   color: var(--yellow);
   text-decoration: none;
 }
-.prLink:hover { text-decoration: underline; }
+.prLink:hover {
+  text-decoration: underline;
+}
 
 .error {
   margin-top: 6px;
@@ -79,6 +140,10 @@
 }
 
 @media (max-width: 480px) {
-  .card { padding: 11px; }
-  .title { font-size: 12px; }
+  .card {
+    padding: 11px;
+  }
+  .title {
+    font-size: 12px;
+  }
 }

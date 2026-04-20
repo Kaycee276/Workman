@@ -32,27 +32,33 @@ logging.basicConfig(
 logger = logging.getLogger("workman")
 
 STATE_FILE = Path("state.json")
+MAX_RETRIES = 3
 
 
-def load_processed() -> set[str]:
+def load_processed() -> tuple[set[str], dict[str, int]]:
     if STATE_FILE.exists():
-        data = json.loads(STATE_FILE.read_text())
-        return set(data.get("processed", []))
-    return set()
+        try:
+            data = json.loads(STATE_FILE.read_text())
+            if not isinstance(data, dict):
+                raise ValueError("State file is not a JSON object")
+            return set(data.get("processed", [])), data.get("failures", {})
+        except (json.JSONDecodeError, ValueError):
+            logger.warning(f"Corrupted {STATE_FILE}, starting with empty state")
+    return set(), {}
 
 
-def save_processed(processed: set[str]) -> None:
-    STATE_FILE.write_text(json.dumps({"processed": list(processed)}, indent=2))
+def save_processed(processed: set[str], failures: dict[str, int]) -> None:
+    STATE_FILE.write_text(json.dumps({"processed": list(processed), "failures": failures}, indent=2))
 
 
-async def poll_loop(watcher: DripsWatcher, processed: set[str]) -> None:
+async def poll_loop(watcher: DripsWatcher, processed: set[str], failures: dict[str, int]) -> None:
     while True:
-        await check_and_process(watcher, processed)
+        await check_and_process(watcher, processed, failures)
         logger.info(f"Sleeping {config.POLL_INTERVAL}s until next check...")
         await asyncio.sleep(config.POLL_INTERVAL)
 
 
-async def check_and_process(watcher: DripsWatcher, processed: set[str]) -> None:
+async def check_and_process(watcher: DripsWatcher, processed: set[str], failures: dict[str, int]) -> None:
     logger.info("Checking Drips for assigned issues...")
     state.log(None, "Polling Drips for assigned issues...")
 
@@ -64,29 +70,40 @@ async def check_and_process(watcher: DripsWatcher, processed: set[str]) -> None:
         state.log(None, f"ERROR: {msg}")
         return
 
-    new_issues = [i for i in issues if i.id not in processed]
-    if not new_issues:
+    actionable = [
+        i for i in issues
+        if i.id not in processed and failures.get(i.id, 0) < MAX_RETRIES
+    ]
+    exhausted = [i for i in issues if i.id not in processed and failures.get(i.id, 0) >= MAX_RETRIES]
+    for i in exhausted:
+        logger.warning(f"Skipping {i.id} — failed {failures[i.id]} times, giving up")
+
+    if not actionable:
         logger.info("No new assigned issues.")
         state.log(None, "No new assigned issues found.")
         return
 
-    logger.info(f"New issues: {[i.id for i in new_issues]}")
+    logger.info(f"New issues: {[i.id for i in actionable]}")
 
     # Register all new issues immediately so they appear in the dashboard as queued
-    for issue in new_issues:
+    for issue in actionable:
         state.upsert_issue(issue.id, title=issue.title, step="queued")
         state.log(issue.id, f"Issue queued: {issue.title}")
 
     # Process one at a time
-    for issue in new_issues:
+    for issue in actionable:
         logger.info(f"Processing {issue.id}...")
         try:
             pr_url = await asyncio.to_thread(run_pipeline, issue)
             logger.info(f"SUCCESS — PR: {pr_url}")
             processed.add(issue.id)
-            save_processed(processed)
+            failures.pop(issue.id, None)
+            save_processed(processed, failures)
         except Exception as e:
-            logger.error(f"Pipeline failed for {issue.id}: {e}", exc_info=True)
+            failures[issue.id] = failures.get(issue.id, 0) + 1
+            save_processed(processed, failures)
+            logger.error(f"Pipeline failed for {issue.id} (attempt {failures[issue.id]}/{MAX_RETRIES}): {e}", exc_info=True)
+            state.log(issue.id, f"Attempt {failures[issue.id]}/{MAX_RETRIES} failed: {e}")
 
 
 async def main_async(once: bool) -> None:
@@ -101,10 +118,10 @@ async def main_async(once: bool) -> None:
     logging.getLogger().addHandler(ws_handler)
 
     watcher = DripsWatcher()
-    processed = load_processed()
+    processed, failures = load_processed()
 
     if once:
-        await check_and_process(watcher, processed)
+        await check_and_process(watcher, processed, failures)
         return
 
     # Run: broadcaster + web server + poll loop, all concurrently
@@ -120,7 +137,7 @@ async def main_async(once: bool) -> None:
     await asyncio.gather(
         state.broadcaster(),
         server.serve(),
-        poll_loop(watcher, processed),
+        poll_loop(watcher, processed, failures),
     )
 
 

@@ -67,7 +67,10 @@ LANG_SETUP_CMDS: dict[str, list[str]] = {
         "[ -f setup.py ] && pip install -e . -q 2>/dev/null || true",
     ],
     "node": [
-        "[ -f package.json ] && npm install --silent 2>/dev/null || true",
+        # Prefer npm ci (fast, deterministic) when lock file exists; fall back to npm install.
+        # --prefer-offline reuses cache; --no-audit/--no-fund skip slow network calls.
+        "[ -f package-lock.json ] && npm ci --prefer-offline --no-audit --no-fund --silent 2>/dev/null"
+        " || npm install --prefer-offline --no-audit --no-fund --silent 2>/dev/null || true",
     ],
     "rust": [
         "rustup target add wasm32-unknown-unknown 2>/dev/null || true",
@@ -77,6 +80,12 @@ LANG_SETUP_CMDS: dict[str, list[str]] = {
         "[ -f go.mod ] && go mod download 2>/dev/null || true",
     ],
     "default": [],
+}
+
+# Per-language setup timeout (seconds). Node installs can be slow on constrained hosts.
+LANG_SETUP_TIMEOUT: dict[str, int] = {
+    "node": 600,
+    "rust": 300,
 }
 
 
@@ -130,12 +139,18 @@ class NativeRunner:
     def __init__(self, repo_path: Path):
         self.repo_path = repo_path
 
-    def setup(self, language: str) -> None:
+    def setup(self, language: str) -> list[str]:
+        """Run setup commands. Returns warning messages for any steps that failed."""
+        timeout = LANG_SETUP_TIMEOUT.get(language, 180)
+        warnings: list[str] = []
         for cmd in LANG_SETUP_CMDS.get(language, []):
             logger.debug(f"Setup: {cmd}")
-            r = self._run(cmd)
+            r = self._run(cmd, timeout=timeout)
             if r["exit_code"] != 0:
-                logger.warning(f"Setup step non-zero ({r['exit_code']}): {r['stderr'][:200]}")
+                msg = f"Setup step failed ({r['exit_code']}): {r['stderr'][:300]}"
+                logger.warning(msg)
+                warnings.append(msg)
+        return warnings
 
     def exec(self, command: str) -> dict:
         try:
@@ -145,7 +160,7 @@ class NativeRunner:
             return {"exit_code": 1, "stdout": "", "stderr": str(e)}
         return self._run(command)
 
-    def _run(self, command: str) -> dict:
+    def _run(self, command: str, timeout: int = 180) -> dict:
         try:
             result = subprocess.run(
                 ["bash", "-c", command],
@@ -153,7 +168,7 @@ class NativeRunner:
                 text=True,
                 cwd=str(self.repo_path),
                 env=_safe_env(),
-                timeout=180,
+                timeout=timeout,
             )
             return {
                 "exit_code": result.returncode,
@@ -161,7 +176,7 @@ class NativeRunner:
                 "stderr": result.stderr,
             }
         except subprocess.TimeoutExpired:
-            return {"exit_code": 1, "stdout": "", "stderr": "Command timed out after 180s"}
+            return {"exit_code": 1, "stdout": "", "stderr": f"Command timed out after {timeout}s"}
         except Exception as e:
             return {"exit_code": 1, "stdout": "", "stderr": str(e)}
 

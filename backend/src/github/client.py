@@ -95,6 +95,14 @@ class GitHubClient:
             logger.info(f"PR created: {pr.html_url}")
             return pr.html_url
         except GithubException as e:
+            # A PR already exists for this branch — find and return it instead of failing.
+            if e.status == 422 and "already exists" in str(e):
+                open_prs = source_repo.get_pulls(state="open", head=head)
+                for pr in open_prs:
+                    logger.info(f"PR already exists: {pr.html_url}")
+                    return pr.html_url
+                # PR not found in open state — may have been closed or merged
+                logger.warning(f"PR reported as existing but not found open for head={head}")
             logger.error(f"Failed to create PR: {e}")
             raise
 
