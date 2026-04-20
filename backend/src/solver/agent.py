@@ -1,5 +1,6 @@
 import json
 import logging
+import shlex
 from pathlib import Path
 
 import anthropic
@@ -203,7 +204,7 @@ class IssueSolver:
 
     def _search(self, pattern: str, path: str) -> str:
         r = self.runner.exec(
-            f"grep -rn {json.dumps(pattern)} {path} 2>/dev/null | head -60"
+            f"grep -rn -e {shlex.quote(pattern)} {shlex.quote(path)} 2>/dev/null | head -60"
         )
         return r["stdout"].strip() or f"No matches for '{pattern}' in {path}"
 

@@ -1,19 +1,33 @@
+@import url("https://fonts.googleapis.com/css2?family=Raleway:ital,wght@0,100..900;1,100..900&display=swap");
+@import url("https://fonts.googleapis.com/css2?family=Saira+Stencil:ital,wght@0,100..900;1,100..900&display=swap");
+
 :root {
-  --bg:      #0d1117;
-  --surface: #161b22;
-  --border:  #30363d;
-  --text:    #e6edf3;
-  --muted:   #8b949e;
-  --accent:  #58a6ff;
-  --green:   #3fb950;
-  --yellow:  #d29922;
-  --red:     #f85149;
-  --font:    'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+  --bg: #141414;
+  --surface: #000000;
+  --border: #2c2c2c;
+  --text: #e0e0e0;
+  --muted: #6b6b6b;
+  --accent: #ffb703;
+  --green: #4caf50;
+  --yellow: #ffb703;
+  --red: #ef5350;
+  --font: "SF Mono", "Fira Code", "Cascadia Code", monospace;
+  --font-header: "Raleway", sans-serif;
+  --font-log: "Saira Stencil", monospace;
+  --cyan: #26c6da;
 }
 
-*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
 
-html, body, #root {
+html,
+body,
+#root {
   height: 100%;
   background: var(--bg);
   color: var(--text);
@@ -22,9 +36,16 @@ html, body, #root {
 }
 
 /* scrollbar */
-::-webkit-scrollbar { width: 4px; }
-::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+::-webkit-scrollbar {
+  width: 4px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 4px;
+}
 
 /* ── layout ── */
 .layout {
@@ -42,13 +63,35 @@ html, body, #root {
   background: var(--surface);
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
+  position: relative;
+}
+
+/* corner brackets on header */
+.header::before,
+.header::after {
+  content: "";
+  position: absolute;
+  width: 12px;
+  height: 12px;
+  pointer-events: none;
+}
+.header::before {
+  bottom: 0;
+  left: 0;
+  border-bottom: 2px solid var(--yellow);
+  border-left: 2px solid var(--yellow);
+}
+.header::after {
+  bottom: 0;
+  right: 0;
+  border-bottom: 2px solid var(--yellow);
+  border-right: 2px solid var(--yellow);
 }
 
 .logo {
-  font-size: 15px;
-  font-weight: 700;
-  letter-spacing: 2px;
-  color: var(--accent);
+  height: 32px;
+  width: auto;
+  display: block;
 }
 
 .header-right {
@@ -61,7 +104,9 @@ html, body, #root {
   display: flex;
   align-items: center;
   gap: 6px;
+  font-family: var(--font-header);
   font-size: 11px;
+  font-weight: 500;
   color: var(--muted);
 }
 
@@ -72,9 +117,14 @@ html, body, #root {
   background: var(--muted);
   transition: background 0.3s;
 }
-.dot.on  { background: var(--green); }
-.dot.off { background: var(--red); }
+.dot.on {
+  background: var(--green);
+}
+.dot.off {
+  background: var(--red);
+}
 
+/* ── main grid ── */
 .main {
   display: grid;
   grid-template-columns: 360px 1fr;
@@ -93,9 +143,11 @@ html, body, #root {
 }
 
 .panel-title {
+  font-family: var(--font-header);
   font-size: 11px;
-  letter-spacing: 1px;
-  color: var(--muted);
+  font-weight: 700;
+  letter-spacing: 1.5px;
+  color: var(--yellow);
   text-transform: uppercase;
   padding-bottom: 8px;
   border-bottom: 1px solid var(--border);
@@ -103,6 +155,7 @@ html, body, #root {
 }
 
 .empty {
+  font-family: var(--font-header);
   color: var(--muted);
   font-size: 12px;
   text-align: center;
@@ -124,11 +177,61 @@ html, body, #root {
   padding: 10px 16px;
   border-bottom: 1px solid var(--border);
   background: var(--surface);
+  font-family: var(--font-header);
   font-size: 11px;
+  font-weight: 700;
   color: var(--muted);
-  letter-spacing: 1px;
+  letter-spacing: 1.5px;
   text-transform: uppercase;
   flex-shrink: 0;
 }
 
-.filter-label { color: var(--accent); }
+.filter-label {
+  color: var(--yellow);
+}
+
+/* ── responsive ── */
+@media (max-width: 768px) {
+  .main {
+    display: flex;
+    flex-direction: column;
+    overflow: visible;
+    flex: 1;
+  }
+
+  .issues-panel {
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+    max-height: 42vh;
+    flex-shrink: 0;
+  }
+
+  .logs-panel {
+    flex: 1;
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  .logo {
+    height: 26px;
+  }
+}
+
+@media (max-width: 480px) {
+  .header {
+    padding: 0 12px;
+    height: 44px;
+  }
+
+  .issues-panel {
+    padding: 12px;
+    gap: 10px;
+    max-height: 38vh;
+  }
+
+  html,
+  body,
+  #root {
+    font-size: 14px;
+  }
+}

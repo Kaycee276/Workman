@@ -22,7 +22,7 @@ export default function App() {
   return (
     <div className="layout">
       <header className="header">
-        <span className="logo">⚙ WORKMAN</span>
+        <img src="/workman.png" alt="Workman" className="logo" />
         <span className="conn">
           <span className={`dot ${connected ? "on" : "off"}`} />
           {connected ? "connected" : "reconnecting..."}

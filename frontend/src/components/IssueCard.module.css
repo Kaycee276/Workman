@@ -1,18 +1,45 @@
+/* --cc controls all four corner bracket colours */
 .card {
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 8px;
+  --cc: var(--yellow);
+  position: relative;
+  background-color: var(--surface);
+
+  /* corner brackets via background gradients */
+  background-image:
+    linear-gradient(var(--cc), var(--cc)),
+    linear-gradient(var(--cc), var(--cc)),
+    linear-gradient(var(--cc), var(--cc)),
+    linear-gradient(var(--cc), var(--cc)),
+    linear-gradient(var(--cc), var(--cc)),
+    linear-gradient(var(--cc), var(--cc)),
+    linear-gradient(var(--cc), var(--cc)),
+    linear-gradient(var(--cc), var(--cc));
+  background-size:
+    14px 2px, 2px 14px,
+    14px 2px, 2px 14px,
+    14px 2px, 2px 14px,
+    14px 2px, 2px 14px;
+  background-position:
+    0 0,       0 0,
+    100% 0,    100% 0,
+    0 100%,    0 100%,
+    100% 100%, 100% 100%;
+  background-repeat: no-repeat;
+
+  border-radius: 4px;
   padding: 14px;
   cursor: pointer;
-  transition: border-color 0.2s;
+  transition: background-color 0.15s;
 }
-.card:hover  { border-color: var(--accent); }
-.selected    { border-color: var(--accent) !important; background: #1c2230; }
-.failed      { border-color: var(--red); }
-.done        { border-color: var(--green); }
 
-.issueId  { font-size: 11px; color: var(--muted); margin-bottom: 4px; }
-.title    { font-size: 13px; color: var(--text); margin-bottom: 10px; line-height: 1.4; word-break: break-word; }
+.card:hover  { background-color: #252525; }
+.selected    { background-color: #272727; }
+.queued      { --cc: var(--muted); }
+.failed      { --cc: var(--red); }
+.done        { --cc: var(--green); }
+
+.issueId  { font-family: var(--font-header); font-size: 11px; font-weight: 600; color: var(--muted); margin-bottom: 4px; }
+.title    { font-family: var(--font-header); font-size: 13px; font-weight: 500; color: var(--text); margin-bottom: 10px; line-height: 1.4; word-break: break-word; }
 
 .steps    { display: flex; gap: 4px; align-items: center; flex-wrap: wrap; }
 .dot {
@@ -22,28 +49,36 @@
   flex-shrink: 0;
 }
 .doneDot   { background: var(--green);  border-color: var(--green); }
-.activeDot { background: var(--accent); border-color: var(--accent); animation: pulse 1s infinite; }
+.activeDot { background: var(--yellow); border-color: var(--yellow); animation: pulse 1s infinite; }
 .failedDot { background: var(--red);    border-color: var(--red); }
 
 @keyframes pulse {
   0%, 100% { opacity: 1; }
-  50%       { opacity: 0.4; }
+  50%       { opacity: 0.35; }
 }
 
-.stepLabel { font-size: 10px; color: var(--muted); margin-top: 6px; }
+.stepLabel { font-family: var(--font-header); font-size: 10px; font-weight: 600; letter-spacing: 0.5px; color: var(--muted); margin-top: 6px; }
 
 .prLink {
   display: inline-block;
   margin-top: 8px;
+  font-family: var(--font-header);
   font-size: 11px;
-  color: var(--green);
+  font-weight: 600;
+  color: var(--yellow);
   text-decoration: none;
 }
 .prLink:hover { text-decoration: underline; }
 
 .error {
   margin-top: 6px;
+  font-family: var(--font-header);
   font-size: 11px;
   color: var(--red);
   word-break: break-word;
+}
+
+@media (max-width: 480px) {
+  .card { padding: 11px; }
+  .title { font-size: 12px; }
 }

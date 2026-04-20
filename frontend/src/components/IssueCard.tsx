@@ -9,6 +9,7 @@ interface Props {
 }
 
 const STEP_LABELS: Record<Step, string> = {
+  queued: "Queued",
   detected: "Detected",
   fetching: "Fetching",
   forking: "Forking",
@@ -21,7 +22,13 @@ const STEP_LABELS: Record<Step, string> = {
 
 export function IssueCard({ issue, steps, selected, onClick }: Props) {
   const stepIdx = steps.indexOf(issue.step);
-  const statusClass = issue.failed ? styles.failed : issue.step === "done" ? styles.done : "";
+  const statusClass = issue.failed
+    ? styles.failed
+    : issue.step === "done"
+    ? styles.done
+    : issue.step === "queued"
+    ? styles.queued
+    : "";
 
   return (
     <div

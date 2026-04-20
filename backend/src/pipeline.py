@@ -19,7 +19,7 @@ def _step(issue_id: str, step: str, msg: str) -> None:
 
 def run_pipeline(issue: DripsIssue) -> str:
     iid = issue.id
-    state.upsert_issue(iid, title=iid, step="detected")
+    state.upsert_issue(iid, step="detected")
     state.log(iid, f"Pipeline started for {iid}")
 
     gh = GitHubClient()
@@ -44,7 +44,7 @@ def run_pipeline(issue: DripsIssue) -> str:
         # 3. Clone
         branch_name = gh.make_branch_name(issue.issue_number, issue.title)
         _step(iid, "cloning", f"Cloning fork (branch: {branch_name})...")
-        clone_repo(gh.get_authenticated_clone_url(forked_repo), repo_path, branch=branch_name)
+        clone_repo(gh.get_clone_url(forked_repo), repo_path, branch=branch_name, token=config.GITHUB_TOKEN)
         state.log(iid, "Clone complete")
 
         # 4. Setup environment natively
@@ -67,14 +67,24 @@ def run_pipeline(issue: DripsIssue) -> str:
 
         # 7. PR
         state.log(iid, "Creating pull request...")
-        pr_url = gh.create_pull_request(
-            source_repo=source_repo,
-            fork_repo=forked_repo,
-            branch=branch_name,
-            issue_number=issue.issue_number,
-            issue_title=issue.title,
-            fix_summary=fix_summary,
-        )
+        try:
+            pr_url = gh.create_pull_request(
+                source_repo=source_repo,
+                fork_repo=forked_repo,
+                branch=branch_name,
+                issue_number=issue.issue_number,
+                issue_title=issue.title,
+                fix_summary=fix_summary,
+            )
+        except Exception as pr_exc:
+            # Clean up the orphaned branch so it doesn't accumulate on the fork
+            try:
+                forked_repo.get_git_ref(f"heads/{branch_name}").delete()
+                state.log(iid, f"Rolled back branch {branch_name} after PR failure")
+            except Exception:
+                pass
+            raise pr_exc
+
         state.upsert_issue(iid, step="done", pr_url=pr_url)
         state.log(iid, f"PR created: {pr_url}")
         return pr_url

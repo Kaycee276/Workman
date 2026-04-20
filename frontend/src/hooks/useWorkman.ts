@@ -4,7 +4,9 @@ import type { Issue, LogEntry, Step, WsMessage } from "../types";
 const MAX_LOGS = 2000;
 
 const API_URL = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
-const WS_URL = API_URL.replace(/^https/, "wss").replace(/^http/, "ws") + "/ws";
+const DASHBOARD_TOKEN: string = import.meta.env.VITE_DASHBOARD_TOKEN ?? "";
+const WS_BASE = API_URL.replace(/^https/, "wss").replace(/^http/, "ws") + "/ws";
+const WS_URL = DASHBOARD_TOKEN ? `${WS_BASE}?token=${encodeURIComponent(DASHBOARD_TOKEN)}` : WS_BASE;
 
 export function useWorkman() {
   const [issues, setIssues] = useState<Record<string, Issue>>({});

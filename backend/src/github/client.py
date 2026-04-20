@@ -47,9 +47,10 @@ class GitHubClient:
         logger.info(f"Forking {owner}/{repo_name}...")
         forked = self.user.create_fork(source)
 
-        # Wait for fork to be ready
-        for _ in range(12):
-            time.sleep(5)
+        # Wait for fork with exponential backoff (2s, 4s, 8s … up to 30s, max ~3 min)
+        for attempt in range(12):
+            wait = min(2 ** (attempt + 1), 30)
+            time.sleep(wait)
             try:
                 forked = self.g.get_repo(f"{self.username}/{repo_name}")
                 if forked.fork:
@@ -97,5 +98,6 @@ class GitHubClient:
             logger.error(f"Failed to create PR: {e}")
             raise
 
-    def get_authenticated_clone_url(self, repo: Repository) -> str:
-        return f"https://{config.GITHUB_TOKEN}@github.com/{repo.full_name}.git"
+    def get_clone_url(self, repo: Repository) -> str:
+        """Returns a clean HTTPS URL with no embedded credentials."""
+        return f"https://github.com/{repo.full_name}.git"

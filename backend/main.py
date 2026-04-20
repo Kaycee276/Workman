@@ -72,10 +72,15 @@ async def check_and_process(watcher: DripsWatcher, processed: set[str]) -> None:
 
     logger.info(f"New issues: {[i.id for i in new_issues]}")
 
+    # Register all new issues immediately so they appear in the dashboard as queued
+    for issue in new_issues:
+        state.upsert_issue(issue.id, title=issue.title, step="queued")
+        state.log(issue.id, f"Issue queued: {issue.title}")
+
+    # Process one at a time
     for issue in new_issues:
         logger.info(f"Processing {issue.id}...")
         try:
-            # Run the sync pipeline in a thread so it doesn't block the event loop
             pr_url = await asyncio.to_thread(run_pipeline, issue)
             logger.info(f"SUCCESS — PR: {pr_url}")
             processed.add(issue.id)

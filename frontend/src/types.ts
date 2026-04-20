@@ -1,4 +1,5 @@
 export type Step =
+  | "queued"
   | "detected"
   | "fetching"
   | "forking"

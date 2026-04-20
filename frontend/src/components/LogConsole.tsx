@@ -41,11 +41,17 @@ export function LogConsole({ logs, filterId }: Props) {
       {filtered.map((entry, i) => {
         const ts = entry.ts ? new Date(entry.ts).toLocaleTimeString() : "";
         const msg = entry.message ?? "";
-        const cls = /error|exception|traceback|failed/i.test(msg)
+        const cls = /error|exception|traceback|failed|✗/i.test(msg)
           ? styles.err
           : /warn/i.test(msg)
           ? styles.warn
-          : styles.info;
+          : /pr created|fix complete|clone complete|branch pushed|fork ready|installed|pushed|done|success/i.test(msg)
+          ? styles.success
+          : /pipeline started|fetching|forking|cloning|detecting|solving|pushing|analyzing|queued|polling|committing|creating pull/i.test(msg)
+          ? styles.step
+          : /sleeping|no new|no matches/i.test(msg)
+          ? styles.dim
+          : "";
         return (
           <div key={i} className={`${styles.line} ${cls}`}>
             <span className={styles.ts}>[{ts}] </span>

@@ -1,9 +1,63 @@
 import logging
+import os
+import re
+import shlex
 import shutil
+import stat
 import subprocess
+import tempfile
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+# Explicit env vars never passed to Claude-executed subprocesses.
+_STRIP_ENV_EXPLICIT: frozenset[str] = frozenset({
+    "GITHUB_TOKEN",
+    "ANTHROPIC_API_KEY",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SESSION_TOKEN",
+    "DATABASE_URL",
+    "SECRET_KEY",
+    "RENDER_API_KEY",
+})
+
+# Any var whose name ends with one of these suffixes is also stripped.
+_SENSITIVE_SUFFIXES: tuple[str, ...] = (
+    "_KEY", "_SECRET", "_TOKEN", "_PASSWORD", "_CREDENTIAL", "_API_KEY",
+)
+
+# Patterns that are blocked outright — destruction outside the repo or
+# pipe-to-shell attacks that could exfiltrate secrets or modify the host.
+_BLOCKED: list[re.Pattern] = [
+    re.compile(r"rm\s+-\S*r\S*\s+[/~]"),                        # rm -rf / or ~/
+    re.compile(r"rm\s+-\S*r\S*\s+\.\."),                        # rm -rf ../
+    re.compile(r"(curl|wget)\s+.*\|\s*(\S+/)?(ba|z|da)?sh\b"),  # piped to any sh variant
+    re.compile(r"(curl|wget)\s+.*\|\s*(\S+/)?python[23]?"),     # piped to python/python3
+    re.compile(r"(curl|wget)\s+.*\|\s*(\S+/)?perl"),            # piped to perl
+    re.compile(r"(curl|wget)\s+.*\|\s*(\S+/)?ruby"),            # piped to ruby
+    re.compile(r"(curl|wget)\s+.*-o\s+/tmp/.*&&.*sh"),          # download-then-exec via /tmp
+    re.compile(r">\s*/etc/"),                                    # overwrite system files
+    re.compile(r">\s*/root/"),
+    re.compile(r"chmod\s+.*\s+/"),                               # chmod on system paths
+    re.compile(r"\bdd\s+.*\bof=/dev/"),                         # dd to block device
+    re.compile(r"\bmkfs\b"),                                     # filesystem format
+]
+
+
+def _safe_env() -> dict[str, str]:
+    """Return os.environ with credentials removed."""
+    def _is_sensitive(name: str) -> bool:
+        upper = name.upper()
+        return upper in _STRIP_ENV_EXPLICIT or any(upper.endswith(s) for s in _SENSITIVE_SUFFIXES)
+    return {k: v for k, v in os.environ.items() if not _is_sensitive(k)}
+
+
+def _check_command(command: str) -> None:
+    """Raise if command matches a blocked pattern."""
+    for pattern in _BLOCKED:
+        if pattern.search(command):
+            raise PermissionError(f"Blocked command pattern '{pattern.pattern}': {command}")
 
 LANG_SETUP_CMDS: dict[str, list[str]] = {
     "python": [
@@ -15,7 +69,10 @@ LANG_SETUP_CMDS: dict[str, list[str]] = {
     "node": [
         "[ -f package.json ] && npm install --silent 2>/dev/null || true",
     ],
-    "rust": [],
+    "rust": [
+        "rustup target add wasm32-unknown-unknown 2>/dev/null || true",
+        "cargo fetch 2>/dev/null || true",
+    ],
     "go": [
         "[ -f go.mod ] && go mod download 2>/dev/null || true",
     ],
@@ -40,7 +97,35 @@ def detect_language(repo_path: Path) -> str:
 
 
 class NativeRunner:
-    """Runs commands directly on the host — no Docker required."""
+    """
+    Runs commands directly on the host — no Docker required.
+
+    SECURITY MODEL
+    --------------
+    Commands are executed via ``bash -c`` inside the cloned repository
+    directory with the following mitigations applied:
+
+    - Credentials stripped: GITHUB_TOKEN, ANTHROPIC_API_KEY and other
+      secrets are removed from the subprocess environment via _safe_env(),
+      so they cannot be read back through echo/env/printenv.
+    - Blocklist: _check_command() rejects patterns known to be destructive
+      (rm -rf on system paths, curl/wget piped to shell, writes to /etc or
+      /root, chmod on system paths) before execution.
+    - Working directory: cwd is always set to the repo clone path, so
+      relative paths stay inside the repo.
+    - Timeout: each command is killed after 180 seconds.
+
+    What is NOT mitigated
+    ---------------------
+    - There is no filesystem namespace isolation (no chroot / container).
+      A sufficiently creative command can still read host files that are
+      world-readable or write to directories the process user owns.
+    - The blocklist is pattern-based and can be bypassed by obfuscation.
+    - Do not run Workman as root or on a machine that holds sensitive data
+      beyond what is already stripped from the environment.
+    - For stronger isolation, replace NativeRunner with a container-backed
+      implementation and run on a dedicated VM or ephemeral sandbox.
+    """
 
     def __init__(self, repo_path: Path):
         self.repo_path = repo_path
@@ -53,13 +138,12 @@ class NativeRunner:
                 logger.warning(f"Setup step non-zero ({r['exit_code']}): {r['stderr'][:200]}")
 
     def exec(self, command: str) -> dict:
+        try:
+            _check_command(command)
+        except PermissionError as e:
+            logger.warning(str(e))
+            return {"exit_code": 1, "stdout": "", "stderr": str(e)}
         return self._run(command)
-
-    def cleanup(self) -> None:
-        pass
-
-    def cleanup_all(self) -> None:
-        pass
 
     def _run(self, command: str) -> dict:
         try:
@@ -68,6 +152,7 @@ class NativeRunner:
                 capture_output=True,
                 text=True,
                 cwd=str(self.repo_path),
+                env=_safe_env(),
                 timeout=180,
             )
             return {
@@ -81,17 +166,75 @@ class NativeRunner:
             return {"exit_code": 1, "stdout": "", "stderr": str(e)}
 
 
-def clone_repo(clone_url: str, dest: Path, branch: str | None = None) -> None:
+def _write_askpass(token: str) -> str:
+    """Write a temp credential-helper script. Returns path; caller must delete."""
+    script = (
+        "#!/bin/sh\n"
+        'case "$1" in\n'
+        "  *Username*) echo x-access-token ;;\n"
+        f"  *) echo {shlex.quote(token)} ;;\n"
+        "esac\n"
+    )
+    fd, path = tempfile.mkstemp(suffix=".sh", prefix="wm_cred_")
+    try:
+        os.write(fd, script.encode())
+    finally:
+        os.close(fd)
+    os.chmod(path, stat.S_IRWXU)  # 700 — only owner can read/execute
+    return path
+
+
+def clone_repo(clone_url: str, dest: Path, branch: str | None = None, token: str | None = None) -> None:
+    import config as _cfg
+
+    # Guard against path traversal — dest must live inside WORKDIR
+    workdir = Path(_cfg.WORKDIR).resolve()
+    dest_resolved = dest.resolve()
+    if not str(dest_resolved).startswith(str(workdir)):
+        raise ValueError(f"Clone destination {dest} is outside WORKDIR {workdir}")
+
+    # Strip any token already embedded in the URL
+    clean_url = re.sub(r"https://[^@]+@github\.com", "https://github.com", clone_url)
+
     if dest.exists():
         shutil.rmtree(dest)
     dest.mkdir(parents=True, exist_ok=True)
 
-    result = subprocess.run(
-        ["git", "clone", "--depth=1", clone_url, str(dest)],
-        capture_output=True, text=True,
-    )
+    env = _safe_env()
+    askpass_path = None
+    if token:
+        askpass_path = _write_askpass(token)
+        env["GIT_ASKPASS"] = askpass_path
+        env["GIT_TERMINAL_PROMPT"] = "0"
+
+    try:
+        result = subprocess.run(
+            ["git", "clone", "--depth=1", clean_url, str(dest)],
+            capture_output=True, text=True, env=env,
+        )
+    finally:
+        if askpass_path:
+            try:
+                os.unlink(askpass_path)
+            except OSError:
+                pass
+
     if result.returncode != 0:
         raise RuntimeError(f"git clone failed: {result.stderr}")
+
+    # Verify the clone actually produced a repo
+    if not (dest / ".git").exists():
+        raise RuntimeError("git clone succeeded but .git directory is missing")
+
+    # Embed credentials into the local .git/config for subsequent pushes.
+    # File I/O keeps the token out of process args / ps aux.
+    if token:
+        authed_url = clean_url.replace("https://github.com/", f"https://x-access-token:{token}@github.com/")
+        git_cfg = dest / ".git" / "config"
+        text = git_cfg.read_text()
+        text = text.replace(f"url = {clean_url}", f"url = {authed_url}")
+        git_cfg.write_text(text)
+        os.chmod(str(git_cfg), 0o600)  # owner read/write only
 
     if branch:
         result = subprocess.run(
