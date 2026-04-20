@@ -18,6 +18,7 @@ import uvicorn
 import config
 from src import state
 from src.drips.watcher import DripsWatcher
+from src.github.client import GitHubClient
 from src.pipeline import run_pipeline
 from src.web.server import app
 
@@ -70,17 +71,43 @@ async def check_and_process(watcher: DripsWatcher, processed: set[str], failures
         state.log(None, f"ERROR: {msg}")
         return
 
-    actionable = [
+    # Filter out already-processed and exhausted-retry issues
+    candidates = [
         i for i in issues
         if i.id not in processed and failures.get(i.id, 0) < MAX_RETRIES
     ]
-    exhausted = [i for i in issues if i.id not in processed and failures.get(i.id, 0) >= MAX_RETRIES]
-    for i in exhausted:
-        logger.warning(f"Skipping {i.id} — failed {failures[i.id]} times, giving up")
+    for i in issues:
+        if i.id not in processed and failures.get(i.id, 0) >= MAX_RETRIES:
+            logger.warning(f"Skipping {i.id} — failed {failures[i.id]} times, giving up")
 
-    if not actionable:
+    if not candidates:
         logger.info("No new assigned issues.")
         state.log(None, "No new assigned issues found.")
+        return
+
+    # Cross-check against GitHub: skip any issue that already has a PR from us.
+    # This survives server restarts even when state.json is missing (e.g. after Render redeploy).
+    gh = GitHubClient()
+    actionable = []
+    for issue in candidates:
+        try:
+            pr_url = await asyncio.to_thread(
+                gh.find_existing_pr, issue.repo_owner, issue.repo_name, issue.issue_number
+            )
+        except Exception as e:
+            logger.warning(f"Failed to check existing PR for {issue.id}, will process anyway: {e}")
+            pr_url = None
+        if pr_url:
+            logger.info(f"Skipping {issue.id} — PR already exists: {pr_url}")
+            state.log(issue.id, f"PR already exists: {pr_url}")
+            processed.add(issue.id)
+            save_processed(processed, failures)
+        else:
+            actionable.append(issue)
+
+    if not actionable:
+        logger.info("All issues already have PRs.")
+        state.log(None, "All candidates already have PRs — nothing to process.")
         return
 
     logger.info(f"New issues: {[i.id for i in actionable]}")

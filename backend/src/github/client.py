@@ -106,6 +106,18 @@ class GitHubClient:
             logger.error(f"Failed to create PR: {e}")
             raise
 
+    def find_existing_pr(self, owner: str, repo_name: str, issue_number: int) -> str | None:
+        """Return URL of any open/merged PR Workman already opened for this issue, or None."""
+        try:
+            results = self.g.search_issues(
+                f"repo:{owner}/{repo_name} is:pr author:{self.username} #{issue_number}"
+            )
+            for pr in results:
+                return pr.html_url
+        except Exception as e:
+            logger.warning(f"Could not check existing PRs for {owner}/{repo_name}#{issue_number}: {e}")
+        return None
+
     def get_clone_url(self, repo: Repository) -> str:
         """Returns a clean HTTPS URL with no embedded credentials."""
         return f"https://github.com/{repo.full_name}.git"
