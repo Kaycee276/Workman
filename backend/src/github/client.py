@@ -61,6 +61,20 @@ class GitHubClient:
 
         raise RuntimeError(f"Fork of {owner}/{repo_name} did not become ready in time")
 
+    def sync_fork(self, fork: Repository) -> bool:
+        """Fast-forward the fork's default branch to upstream HEAD.
+
+        Returns True on success, False if the fork has diverged or the API call
+        fails. On False the caller should assume the fork is stale.
+        """
+        try:
+            fork.merge_upstream(fork.default_branch)
+            logger.info(f"Synced fork {fork.full_name} with upstream ({fork.default_branch})")
+            return True
+        except GithubException as e:
+            logger.warning(f"Could not sync fork {fork.full_name}: {e}")
+            return False
+
     def make_branch_name(self, issue_number: int, issue_title: str) -> str:
         slug = _slugify(issue_title)
         return f"fix/issue-{issue_number}-{slug}"

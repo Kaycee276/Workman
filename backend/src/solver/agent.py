@@ -89,26 +89,27 @@ Your workflow:
 2. Explore the repository structure to understand the codebase
 3. Find the relevant code that needs to change
 4. Make the necessary edits
-5. Run the project's tests to verify your fix works
-6. If tests fail, debug and iterate
-7. When confident the fix is correct and tests pass, call `finish` with a clear summary
+5. Verify your fix with whatever the repo supports — tests, a type-check
+   (`tsc --noEmit`, `mypy`), a compile check (`cargo check`, `go build`), or
+   a lint. Pick the fastest verification available.
+6. If verification fails, debug and iterate
+7. When the fix looks correct, call `finish` with a clear summary
 
 Rules:
 - Only change what is necessary to fix the issue — do not refactor unrelated code
-- Always run tests before calling `finish`
-- If there are no tests, at least verify the code runs without errors
+- Verify with the best tool available for the project. If no automated check is
+  feasible, rely on careful reading of the relevant code.
 - Write clean, idiomatic code matching the project's style
 - Do not add comments unless the logic is genuinely non-obvious
-
-Handling unavailable toolchains:
-- If dependency installation failed (e.g. node_modules missing, cargo not found),
-  do not waste iterations trying to run compiler or test commands that require them.
-  Make your best fix to the source code based on reading and understanding it, then
-  call `finish` with an honest note that local verification was skipped due to a
-  missing toolchain.
-- Be decisive: if you have read the relevant code, understood the issue, and written
-  a fix — call `finish`. Do not loop trying the same failing command repeatedly.
+- Be decisive: once you have read the relevant code, understood the issue, and
+  written a fix, call `finish`. Do not loop retrying the same failing command.
+- The `finish` summary describes the code change only. Do not mention the local
+  environment, tooling, or whether verification was run.
 """
+
+
+PRIMARY_MODEL = "claude-opus-4-7"
+FALLBACK_MODEL = "claude-sonnet-4-6"
 
 
 class IssueSolver:
@@ -116,20 +117,44 @@ class IssueSolver:
         self.client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
         self.runner = runner
         self.repo_path = repo_path
+        self.model = PRIMARY_MODEL
 
-    def solve(self, issue_title: str, issue_body: str, setup_warnings: list[str] | None = None) -> str:
-        setup_section = ""
-        if setup_warnings:
-            joined = "\n".join(f"- {w}" for w in setup_warnings)
-            setup_section = (
-                f"\n\n**Setup warnings (dependency installation had issues):**\n{joined}\n"
-                "Some build tools may be unavailable. Fix the source code directly "
-                "and skip compilation checks if they fail."
+    def _create(self, messages: list[dict]):
+        try:
+            return self.client.messages.create(
+                model=self.model,
+                max_tokens=8096,
+                system=SYSTEM_PROMPT,
+                tools=TOOLS,
+                messages=messages,
+            )
+        except (anthropic.NotFoundError, anthropic.BadRequestError) as e:
+            if self.model != PRIMARY_MODEL:
+                raise
+            logger.warning(f"{self.model} unavailable ({e}); falling back to {FALLBACK_MODEL}")
+            self.model = FALLBACK_MODEL
+            return self.client.messages.create(
+                model=self.model,
+                max_tokens=8096,
+                system=SYSTEM_PROMPT,
+                tools=TOOLS,
+                messages=messages,
+            )
+
+    def solve(
+        self,
+        issue_title: str,
+        issue_body: str,
+        available_tools: list[str] | None = None,
+    ) -> str:
+        tools_section = ""
+        if available_tools:
+            tools_section = (
+                f"\n\nVerification binaries available on PATH: {', '.join(available_tools)}."
             )
         user_message = (
             f"# Issue: {issue_title}\n\n"
-            f"{issue_body}"
-            f"{setup_section}\n\n"
+            f"{issue_body}{tools_section}\n\n"
             "Please fix this issue. Start by exploring the repository structure."
         )
         messages: list[dict] = [{"role": "user", "content": user_message}]
@@ -137,15 +162,9 @@ class IssueSolver:
 
         while iterations < config.MAX_SOLVER_ITERATIONS:
             iterations += 1
-            logger.info(f"Solver iteration {iterations}")
+            logger.info(f"Solver iteration {iterations} (model={self.model})")
 
-            response = self.client.messages.create(
-                model="claude-sonnet-4-6",
-                max_tokens=8096,
-                system=SYSTEM_PROMPT,
-                tools=TOOLS,
-                messages=messages,
-            )
+            response = self._create(messages)
             messages.append({"role": "assistant", "content": response.content})
 
             if response.stop_reason == "end_turn":

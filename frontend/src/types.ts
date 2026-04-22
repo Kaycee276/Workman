@@ -26,6 +26,8 @@ export interface LogEntry {
   ts: string;
 }
 
+export type LogRange = "1h" | "24h" | "3d";
+
 export type WsMessage =
   | { type: "init"; issues: Issue[]; steps: Step[] }
   | { type: "issue_update"; issue: Issue }

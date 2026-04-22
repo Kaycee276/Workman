@@ -10,7 +10,6 @@ services:
       # Persist cloned repos across restarts
       - workman-repos:/tmp/workman
       # Mount your secrets (not baked into image)
-      - ./cookies.json:/app/cookies.json:ro
       - ./.env:/app/.env:ro
       # Persist the processed-issues state file
       - ./state.json:/app/state.json

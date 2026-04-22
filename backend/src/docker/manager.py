@@ -66,27 +66,17 @@ LANG_SETUP_CMDS: dict[str, list[str]] = {
         "[ -f pyproject.toml ] && pip install -e . -q 2>/dev/null || true",
         "[ -f setup.py ] && pip install -e . -q 2>/dev/null || true",
     ],
-    "node": [
-        # Prefer npm ci (fast, deterministic) when lock file exists; fall back to npm install.
-        # --prefer-offline reuses cache; --no-audit/--no-fund skip slow network calls.
-        "[ -f package-lock.json ] && npm ci --prefer-offline --no-audit --no-fund --silent 2>/dev/null"
-        " || npm install --prefer-offline --no-audit --no-fund --silent 2>/dev/null || true",
-    ],
-    "rust": [
-        "rustup target add wasm32-unknown-unknown 2>/dev/null || true",
-        "cargo fetch 2>/dev/null || true",
-    ],
     "go": [
         "[ -f go.mod ] && go mod download 2>/dev/null || true",
     ],
+    # node and rust skipped — installs regularly blow past any reasonable timeout on
+    # constrained hosts. Solver works from source analysis for these languages.
+    "node": [],
+    "rust": [],
     "default": [],
 }
 
-# Per-language setup timeout (seconds). Node installs can be slow on constrained hosts.
-LANG_SETUP_TIMEOUT: dict[str, int] = {
-    "node": 600,
-    "rust": 300,
-}
+SETUP_TIMEOUT = 180
 
 
 def detect_language(repo_path: Path) -> str:
@@ -139,17 +129,29 @@ class NativeRunner:
     def __init__(self, repo_path: Path):
         self.repo_path = repo_path
 
-    def setup(self, language: str) -> list[str]:
-        """Run setup commands. Returns warning messages for any steps that failed."""
-        timeout = LANG_SETUP_TIMEOUT.get(language, 180)
-        warnings: list[str] = []
+    def setup(self, language: str) -> list[dict]:
+        """Run setup commands. Returns structured warnings for any failures.
+
+        Each warning is {"kind": str, "cmd": str, "detail": str} where kind is
+        one of: "timeout", "network", "exit". Use kind to aggregate patterns
+        across runs (e.g. repeated "network" across repos means a flaky host).
+        """
+        warnings: list[dict] = []
         for cmd in LANG_SETUP_CMDS.get(language, []):
             logger.debug(f"Setup: {cmd}")
-            r = self._run(cmd, timeout=timeout)
-            if r["exit_code"] != 0:
-                msg = f"Setup step failed ({r['exit_code']}): {r['stderr'][:300]}"
-                logger.warning(msg)
-                warnings.append(msg)
+            r = self._run(cmd, timeout=SETUP_TIMEOUT)
+            if r["exit_code"] == 0:
+                continue
+            stderr = r["stderr"][:300]
+            if "timed out" in stderr.lower():
+                kind = "timeout"
+            elif any(s in stderr.lower() for s in ("network is unreachable", "dns", "name resolution", "could not resolve", "connection refused", "connection timed out")):
+                kind = "network"
+            else:
+                kind = "exit"
+            warning = {"kind": kind, "cmd": cmd, "detail": stderr}
+            logger.warning(f"Setup step failed [{kind}] ({r['exit_code']}): {stderr}")
+            warnings.append(warning)
         return warnings
 
     def exec(self, command: str) -> dict:

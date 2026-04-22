@@ -1,8 +1,8 @@
 .venv/
 .env
-cookies.json
 state.json
 workman.log
+logs.db
 __pycache__/
 *.pyc
 .claude/

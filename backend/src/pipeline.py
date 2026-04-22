@@ -1,4 +1,5 @@
 import logging
+import shutil
 from pathlib import Path
 
 import config
@@ -9,6 +10,16 @@ from src.docker.manager import NativeRunner, clone_repo, detect_language, push_a
 from src.solver.agent import IssueSolver
 
 logger = logging.getLogger(__name__)
+
+# Languages whose fixes can't be sanity-checked without a compiler/type-checker.
+# If the binary is absent we abort rather than ship an unverifiable PR.
+_VERIFY_BINARIES: dict[str, str] = {
+    "rust": "cargo",
+    "node": "npm",
+    "go": "go",
+    "python": "python3",
+}
+_REQUIRED_VERIFY: frozenset[str] = frozenset({"rust", "node"})
 
 
 def _step(issue_id: str, step: str, msg: str) -> None:
@@ -41,6 +52,14 @@ def run_pipeline(issue: DripsIssue) -> str:
         source_repo = gh.g.get_repo(f"{issue.repo_owner}/{issue.repo_name}")
         state.log(iid, f"Fork ready: {forked_repo.full_name}")
 
+        # Fast-forward the fork to upstream HEAD — forks don't auto-sync, so
+        # a repo we forked weeks ago for a past issue would otherwise send
+        # Claude working against stale code.
+        if gh.sync_fork(forked_repo):
+            state.log(iid, "Fork synced with upstream")
+        else:
+            state.log(iid, "Fork sync skipped (diverged or API error) — continuing with existing fork state")
+
         # 3. Clone
         branch_name = gh.make_branch_name(issue.issue_number, issue.title)
         _step(iid, "cloning", f"Cloning fork (branch: {branch_name})...")
@@ -53,14 +72,29 @@ def run_pipeline(issue: DripsIssue) -> str:
         runner = NativeRunner(repo_path)
         setup_warnings = runner.setup(language)
         if setup_warnings:
-            state.log(iid, f"Setup warnings: {'; '.join(setup_warnings)}")
+           tagged = "; ".join(
+                f"[{w.get('kind', 'UNKNOWN')}] {w.get('detail', 'no details')}"
+                for w in setup_warnings
+            )
+            state.log(iid, f"Setup complete with warnings: {tagged}")
         else:
-            state.log(iid, "Dependencies installed")
+            state.log(iid, "Setup complete")
+
+        # Preflight: abort if we can't even sanity-check a fix for this language.
+        required = _VERIFY_BINARIES.get(language)
+        if language in _REQUIRED_VERIFY and required and not shutil.which(required):
+            raise RuntimeError(
+                f"{required} not on PATH — refusing to ship an unverified {language} fix"
+            )
+
+        available_tools = sorted(
+            name for name in _VERIFY_BINARIES.values() if shutil.which(name)
+        )
 
         # 5. Claude solver
         _step(iid, "solving", "Claude is analyzing the issue and writing the fix...")
         solver = IssueSolver(runner, repo_path)
-        fix_summary = solver.solve(issue.title, issue.description, setup_warnings=setup_warnings)
+        fix_summary = solver.solve(issue.title, issue.description, available_tools=available_tools)
         state.log(iid, f"Fix complete: {fix_summary}")
 
         # 6. Push
