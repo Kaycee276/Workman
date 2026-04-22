@@ -72,7 +72,7 @@ def run_pipeline(issue: DripsIssue) -> str:
         runner = NativeRunner(repo_path)
         setup_warnings = runner.setup(language)
         if setup_warnings:
-           tagged = "; ".join(
+            tagged = "; ".join(
                 f"[{w.get('kind', 'UNKNOWN')}] {w.get('detail', 'no details')}"
                 for w in setup_warnings
             )
