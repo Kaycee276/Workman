@@ -44,6 +44,18 @@ _BLOCKED: list[re.Pattern] = [
     re.compile(r"\bmkfs\b"),                                     # filesystem format
 ]
 
+# Dependency installers are blocked because they OOM constrained hosts — npm
+# alone routinely spikes 300-500MB resolving node_modules. The solver is
+# expected to reason from source instead. Separate from _BLOCKED so the error
+# message can guide the model toward the right next step.
+_DEP_INSTALL_BLOCKED: list[re.Pattern] = [
+    re.compile(r"\bnpm\s+(install|i|ci|update|add)\b"),
+    re.compile(r"\byarn(\s+(install|add|upgrade))?\s*$"),
+    re.compile(r"\byarn\s+(install|add|upgrade)\b"),
+    re.compile(r"\bpnpm\s+(install|i|add|update)\b"),
+    re.compile(r"\bbun\s+(install|i|add)\b"),
+]
+
 
 def _safe_env() -> dict[str, str]:
     """Return os.environ with credentials removed."""
@@ -69,6 +81,13 @@ def _check_command(command: str) -> None:
     for pattern in _BLOCKED:
         if pattern.search(command):
             raise PermissionError(f"Blocked command pattern '{pattern.pattern}': {command}")
+    for pattern in _DEP_INSTALL_BLOCKED:
+        if pattern.search(command):
+            raise PermissionError(
+                "Dependency installers are disabled on this host (memory-constrained). "
+                "Do not retry with a different flag or package manager. "
+                "Reason about the fix from source code, then call `finish`."
+            )
 
 LANG_SETUP_CMDS: dict[str, list[str]] = {
     "python": [

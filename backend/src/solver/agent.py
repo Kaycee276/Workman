@@ -112,11 +112,18 @@ Finishing — read carefully:
 - Do NOT after that point: add documentation, write extra test cases, chase
   coverage numbers, refactor the fix, or tweak unrelated files. Those are scope
   creep and will cause you to run out of iterations.
-- If verification tooling cannot be installed after 2 attempts, stop retrying.
-  Rely on careful reading of the code and call `finish`. Burning iterations on
-  `npm install` / dependency setup is the #1 way this job fails.
 - If you catch yourself running the same command variant a third time, stop and
   call `finish` with what you have.
+
+Host restrictions (do not fight these):
+- Dependency installers are BLOCKED: `npm install`, `npm ci`, `yarn add`,
+  `pnpm install`, `bun install`, and equivalents will fail every time. Do not
+  attempt them under any flag or variant — the host is memory-constrained.
+- If a Node/TS project is missing its `node_modules`, you cannot run tests or
+  `tsc`. In that case, verify by careful source reading alone and call `finish`.
+- Static verification that does NOT need installed deps (grep for pattern use,
+  reading type signatures, checking imports match exports) is still valuable —
+  prefer that over giving up.
 """
 
 
