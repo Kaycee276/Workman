@@ -123,6 +123,30 @@ Finishing — read carefully:
 PRIMARY_MODEL = "claude-opus-4-7"
 FALLBACK_MODEL = "claude-sonnet-4-6"
 
+# Keep the last N tool-result turns verbatim; older ones are shrunk to a stub.
+# Stale tool output doesn't help the model reason and balloons memory / tokens.
+TOOL_RESULT_WINDOW = 10
+TOOL_RESULT_STUB_LEN = 120
+
+
+def _trim_old_tool_results(messages: list[dict]) -> None:
+    tool_turns = [
+        i for i, m in enumerate(messages)
+        if m["role"] == "user"
+        and isinstance(m["content"], list)
+        and any(isinstance(b, dict) and b.get("type") == "tool_result" for b in m["content"])
+    ]
+    if len(tool_turns) <= TOOL_RESULT_WINDOW:
+        return
+    for idx in tool_turns[:-TOOL_RESULT_WINDOW]:
+        for block in messages[idx]["content"]:
+            if not (isinstance(block, dict) and block.get("type") == "tool_result"):
+                continue
+            content = block.get("content", "")
+            if isinstance(content, str) and len(content) > TOOL_RESULT_STUB_LEN:
+                first_line = content.split("\n", 1)[0][:TOOL_RESULT_STUB_LEN]
+                block["content"] = f"[truncated, {len(content)} chars] {first_line}"
+
 
 class IssueSolver:
     def __init__(self, runner: NativeRunner, repo_path: Path):
@@ -211,6 +235,7 @@ class IssueSolver:
                 })
 
             messages.append({"role": "user", "content": tool_results})
+            _trim_old_tool_results(messages)
 
         raise RuntimeError(f"Solver hit max iterations ({config.MAX_SOLVER_ITERATIONS}) without finishing")
 

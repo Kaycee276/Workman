@@ -28,6 +28,18 @@ def _step(issue_id: str, step: str, msg: str) -> None:
     state.log(issue_id, msg)
 
 
+def _cleanup_path(path: Path) -> None:
+    if not path.exists():
+        return
+    try:
+        if path.is_dir():
+            shutil.rmtree(path, ignore_errors=True)
+        else:
+            path.unlink(missing_ok=True)
+    except Exception as e:
+        logger.warning(f"Failed to clean {path}: {e}")
+
+
 def run_pipeline(issue: DripsIssue) -> str:
     iid = issue.id
     state.upsert_issue(iid, step="detected")
@@ -35,6 +47,7 @@ def run_pipeline(issue: DripsIssue) -> str:
 
     gh = GitHubClient()
     repo_path = Path(config.WORKDIR) / f"{issue.repo_owner}_{issue.repo_name}_{issue.issue_number}"
+    _cleanup_path(repo_path)
 
     try:
         # 1. Fetch GitHub issue details
@@ -130,3 +143,5 @@ def run_pipeline(issue: DripsIssue) -> str:
         state.upsert_issue(iid, failed=True, error=str(exc))
         state.log(iid, f"ERROR: {exc}")
         raise
+    finally:
+        _cleanup_path(repo_path)
