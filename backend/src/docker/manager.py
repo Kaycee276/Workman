@@ -53,6 +53,17 @@ def _safe_env() -> dict[str, str]:
     return {k: v for k, v in os.environ.items() if not _is_sensitive(k)}
 
 
+def _read_tail(fileobj, max_bytes: int) -> str:
+    fileobj.seek(0, os.SEEK_END)
+    size = fileobj.tell()
+    if size <= max_bytes:
+        fileobj.seek(0)
+        return fileobj.read().decode("utf-8", errors="replace")
+    fileobj.seek(size - max_bytes)
+    tail = fileobj.read().decode("utf-8", errors="replace")
+    return f"[truncated, {size - max_bytes} bytes dropped]\n{tail}"
+
+
 def _check_command(command: str) -> None:
     """Raise if command matches a blocked pattern."""
     for pattern in _BLOCKED:
@@ -77,6 +88,11 @@ LANG_SETUP_CMDS: dict[str, list[str]] = {
 }
 
 SETUP_TIMEOUT = 180
+
+# Cap per-stream captured output. Commands like `npm install` emit tens of MB of
+# progress noise that we'd otherwise hold fully in RAM before truncating it at
+# the solver layer. Capture to disk, read back only the tail.
+MAX_CAPTURE_BYTES = 64 * 1024
 
 
 def detect_language(repo_path: Path) -> str:
@@ -164,19 +180,20 @@ class NativeRunner:
 
     def _run(self, command: str, timeout: int = 180) -> dict:
         try:
-            result = subprocess.run(
-                ["bash", "-c", command],
-                capture_output=True,
-                text=True,
-                cwd=str(self.repo_path),
-                env=_safe_env(),
-                timeout=timeout,
-            )
-            return {
-                "exit_code": result.returncode,
-                "stdout": result.stdout,
-                "stderr": result.stderr,
-            }
+            with tempfile.TemporaryFile() as out_f, tempfile.TemporaryFile() as err_f:
+                result = subprocess.run(
+                    ["bash", "-c", command],
+                    stdout=out_f,
+                    stderr=err_f,
+                    cwd=str(self.repo_path),
+                    env=_safe_env(),
+                    timeout=timeout,
+                )
+                return {
+                    "exit_code": result.returncode,
+                    "stdout": _read_tail(out_f, MAX_CAPTURE_BYTES),
+                    "stderr": _read_tail(err_f, MAX_CAPTURE_BYTES),
+                }
         except subprocess.TimeoutExpired:
             return {"exit_code": 1, "stdout": "", "stderr": f"Command timed out after {timeout}s"}
         except Exception as e:
