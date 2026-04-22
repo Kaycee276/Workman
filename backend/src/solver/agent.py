@@ -105,6 +105,18 @@ Rules:
   written a fix, call `finish`. Do not loop retrying the same failing command.
 - The `finish` summary describes the code change only. Do not mention the local
   environment, tooling, or whether verification was run.
+
+Finishing — read carefully:
+- The moment the fix is written AND one verification (tests, type-check, build,
+  or lint) passes, call `finish` on the next turn. Do not do anything else first.
+- Do NOT after that point: add documentation, write extra test cases, chase
+  coverage numbers, refactor the fix, or tweak unrelated files. Those are scope
+  creep and will cause you to run out of iterations.
+- If verification tooling cannot be installed after 2 attempts, stop retrying.
+  Rely on careful reading of the code and call `finish`. Burning iterations on
+  `npm install` / dependency setup is the #1 way this job fails.
+- If you catch yourself running the same command variant a third time, stop and
+  call `finish` with what you have.
 """
 
 
