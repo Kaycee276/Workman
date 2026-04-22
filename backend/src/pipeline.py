@@ -75,6 +75,16 @@ def run_pipeline(issue: DripsIssue) -> str:
 
         # 3. Clone
         branch_name = gh.make_branch_name(issue.issue_number, issue.title)
+
+        # Delete any stale branch from a previous attempt on this issue. If
+        # a human closed an earlier PR to signal "retry", its branch still
+        # lives on the fork and would cause a non-fast-forward push later.
+        try:
+            forked_repo.get_git_ref(f"heads/{branch_name}").delete()
+            state.log(iid, f"Deleted stale branch {branch_name} from previous attempt")
+        except Exception:
+            pass
+
         _step(iid, "cloning", f"Cloning fork (branch: {branch_name})...")
         clone_repo(gh.get_clone_url(forked_repo), repo_path, branch=branch_name, token=config.GITHUB_TOKEN)
         state.log(iid, "Clone complete")

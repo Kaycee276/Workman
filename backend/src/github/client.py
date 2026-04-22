@@ -121,13 +121,23 @@ class GitHubClient:
             raise
 
     def find_existing_pr(self, owner: str, repo_name: str, issue_number: int) -> str | None:
-        """Return URL of any open/merged PR Workman already opened for this issue, or None."""
+        """Return URL of any open or merged PR Workman already opened for this issue.
+
+        Closed-but-unmerged PRs do NOT count — a human closing a PR is the
+        signal to retry. Open means in-flight, merged means accepted.
+        """
         try:
             results = self.g.search_issues(
                 f"repo:{owner}/{repo_name} is:pr author:{self.username} #{issue_number}"
             )
-            for pr in results:
-                return pr.html_url
+            for gh_issue in results:
+                if gh_issue.state == "open":
+                    return gh_issue.html_url
+                try:
+                    if gh_issue.as_pull_request().merged:
+                        return gh_issue.html_url
+                except Exception:
+                    continue
         except Exception as e:
             logger.warning(f"Could not check existing PRs for {owner}/{repo_name}#{issue_number}: {e}")
         return None
