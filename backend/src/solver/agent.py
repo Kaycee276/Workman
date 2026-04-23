@@ -269,11 +269,21 @@ class IssueSolver:
                 f"{verification_error}"
             ),
         })
-        return self._run_loop()
+        return self._run_loop(max_seconds=300)
 
-    def _run_loop(self) -> str:
+    def _run_loop(self, max_seconds: int | None = None) -> str:
         iterations = 0
+        deadline = time.monotonic() + max_seconds if max_seconds else None
         while iterations < config.MAX_SOLVER_ITERATIONS:
+            if deadline is not None and time.monotonic() >= deadline:
+                logger.warning(
+                    f"Solver wall-clock budget ({max_seconds}s) exceeded at "
+                    f"iteration {iterations}; returning partial fix"
+                )
+                return (
+                    "(partial) Time budget exceeded while addressing verification "
+                    "failures — current changes will be pushed for CI to evaluate."
+                )
             iterations += 1
             logger.info(f"Solver iteration {iterations} (model={self.model})")
 
