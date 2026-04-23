@@ -22,6 +22,30 @@ _VERIFY_BINARIES: dict[str, str] = {
 _REQUIRED_VERIFY: frozenset[str] = frozenset({"rust", "node"})
 
 
+def _run_verification(runner: NativeRunner, language: str) -> str | None:
+    """Run verification for the language. Return error message if failed, None if passed."""
+    try:
+        if language == "python":
+            # Since deps not installed to save resources, do basic syntax check
+            result = runner._run("python -m py_compile $(find . -name '*.py' -not -path './.*' | head -20)", timeout=30)
+            if result["exit_code"] != 0:
+                return f"py_compile failed:\n{result['stdout']}\n{result['stderr']}"
+        elif language == "node":
+            # No deps installed, skip npm test
+            pass
+        elif language == "go":
+            result = runner._run("go build ./...", timeout=60)
+            if result["exit_code"] != 0:
+                return f"go build failed:\n{result['stdout']}\n{result['stderr']}"
+        elif language == "rust":
+            # No deps installed, skip cargo test
+            pass
+        # Add more languages as needed
+    except Exception as e:
+        return f"Verification error: {e}"
+    return None
+
+
 def _step(issue_id: str, step: str, msg: str) -> None:
     logger.info(msg)
     state.upsert_issue(issue_id, step=step)
@@ -118,6 +142,19 @@ def run_pipeline(issue: DripsIssue) -> str:
         _step(iid, "solving", "Claude is analyzing the issue and writing the fix...")
         solver = IssueSolver(runner, repo_path)
         fix_summary = solver.solve(issue.title, issue.description, available_tools=available_tools)
+
+        # 5.5. Verify the fix
+        _step(iid, "verifying", "Running verification...")
+        verification_error = _run_verification(runner, language)
+        if verification_error:
+            _step(iid, "re-solving", "Verification failed, re-analyzing with errors...")
+            issue.description += f"\n\nVerification failed. Please fix the following errors and ensure tests pass:\n{verification_error}"
+            fix_summary = solver.solve(issue.title, issue.description, available_tools=available_tools)
+            # Verify again
+            verification_error = _run_verification(runner, language)
+            if verification_error:
+                raise RuntimeError(f"Verification failed after retry: {verification_error}")
+
         state.log(iid, f"Fix complete: {fix_summary}")
 
         # 6. Push
