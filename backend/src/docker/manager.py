@@ -6,6 +6,7 @@ import shutil
 import stat
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -273,6 +274,29 @@ def _write_askpass(token: str) -> str:
     return path
 
 
+_CLONE_RETRY_BACKOFF: tuple[int, ...] = (15, 30, 60)
+
+# stderr fragments that indicate a transient GitHub / network failure worth
+# retrying rather than giving up on. Matches the "RPC failed; HTTP 500" class
+# of errors where the server or proxy hiccuped mid-ref-listing.
+_TRANSIENT_CLONE_PATTERNS: tuple[str, ...] = (
+    "RPC failed",
+    "HTTP 5",  # covers 500/502/503/504
+    "unexpected disconnect",
+    "expected flush",
+    "early EOF",
+    "Connection reset",
+    "Connection timed out",
+    "Could not resolve host",
+    "Temporary failure",
+    "fetch-pack",
+)
+
+
+def _clone_error_is_transient(stderr: str) -> bool:
+    return any(p in stderr for p in _TRANSIENT_CLONE_PATTERNS)
+
+
 def clone_repo(clone_url: str, dest: Path, branch: str | None = None, token: str | None = None) -> None:
     import config as _cfg
 
@@ -285,10 +309,6 @@ def clone_repo(clone_url: str, dest: Path, branch: str | None = None, token: str
     # Strip any token already embedded in the URL
     clean_url = re.sub(r"https://[^@]+@github\.com", "https://github.com", clone_url)
 
-    if dest.exists():
-        shutil.rmtree(dest)
-    dest.mkdir(parents=True, exist_ok=True)
-
     env = _safe_env()
     askpass_path = None
     if token:
@@ -297,19 +317,37 @@ def clone_repo(clone_url: str, dest: Path, branch: str | None = None, token: str
         env["GIT_TERMINAL_PROMPT"] = "0"
 
     try:
-        result = subprocess.run(
-            ["git", "clone", "--depth=1", clean_url, str(dest)],
-            capture_output=True, text=True, env=env,
-        )
+        attempt = 0
+        while True:
+            if dest.exists():
+                shutil.rmtree(dest)
+            dest.mkdir(parents=True, exist_ok=True)
+
+            result = subprocess.run(
+                ["git", "clone", "--depth=1", clean_url, str(dest)],
+                capture_output=True, text=True, env=env,
+            )
+            if result.returncode == 0:
+                break
+
+            stderr = result.stderr or ""
+            transient = _clone_error_is_transient(stderr)
+            if not transient or attempt >= len(_CLONE_RETRY_BACKOFF):
+                raise RuntimeError(f"git clone failed: {stderr}")
+
+            wait = _CLONE_RETRY_BACKOFF[attempt]
+            attempt += 1
+            logger.warning(
+                f"git clone transient failure (attempt {attempt}/"
+                f"{len(_CLONE_RETRY_BACKOFF)}); retrying in {wait}s. stderr: {stderr.strip()}"
+            )
+            time.sleep(wait)
     finally:
         if askpass_path:
             try:
                 os.unlink(askpass_path)
             except OSError:
                 pass
-
-    if result.returncode != 0:
-        raise RuntimeError(f"git clone failed: {result.stderr}")
 
     # Verify the clone actually produced a repo
     if not (dest / ".git").exists():
