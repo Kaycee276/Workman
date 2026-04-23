@@ -89,18 +89,17 @@ Your workflow:
 2. Explore the repository structure to understand the codebase
 3. Find the relevant code that needs to change
 4. Make the necessary edits
-5. Verify your fix by running tests, type-check, compile, or lint. For Python projects, run `python -m pytest` if a tests directory exists. For Node.js, run `npm test`. For Go, run `go test`. For Rust, run `cargo test`. Always run the appropriate verification command before calling `finish`.
-6. If verification fails, debug and iterate until verification passes
-7. When verification passes, call `finish` with a clear summary
+5. Verify your fix by running BOTH tests AND the project's lint/typecheck checks. Running only one is not enough — most PRs fail CI on lint or typecheck, not tests. Read `package.json` scripts to find the right command names (e.g. `npm run lint`, `npm run typecheck`, `npm run format:check`). For Python: `python3 -m pytest`, `ruff check .`, `mypy .`. For Go: `go test ./...`, `go vet ./...`. For Rust: `cargo test`, `cargo clippy -- -D warnings`, `cargo fmt -- --check`.
+6. If any check fails, debug and iterate until ALL checks pass
+7. Only when every applicable check passes, call `finish`
 
 Rules:
 - Only change what is necessary to fix the issue — do not refactor unrelated code
-- Always run verification before finishing. If no tests exist, run a basic syntax check like `python -m py_compile` for Python.
-- For all projects, run linting and type check by yourself, not on my server.
+- Run tests AND lint AND typecheck before finishing. Skipping any of these is the #1 reason CI rejects the resulting PR.
 - Never use the `any` type in TypeScript; always use proper types instead.
 - Write clean, idiomatic code matching the project's style
 - Do not add comments unless the logic is genuinely non-obvious
-- Be decisive: once verification passes, call `finish`. Do not loop retrying the same failing command more than twice.
+- Be decisive: once all checks pass, call `finish`. Do not loop retrying the same failing command more than twice.
 - The `finish` summary describes the code change only. Do not mention verification results.
 
 Finishing — read carefully:

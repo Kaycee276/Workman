@@ -37,14 +37,30 @@ def _node_checks(repo: Path) -> list[tuple[str, str, int]]:
     if "test" in scripts:
         checks.append(("test", "npm test --silent 2>&1", 900))
 
-    if "lint" in scripts:
-        checks.append(("lint", "npm run lint --silent 2>&1", 300))
+    # Run every lint/typecheck/format-check script the project defines. CI
+    # usually invokes a subset; running them all catches whatever CI catches
+    # without us having to know the project's naming convention.
+    lint_keywords = ("lint", "typecheck", "type-check", "format:check", "format-check", "check-format", "check:format")
+    skip_keywords = ("fix", "write", "watch", "dev", "format:write")
 
-    if "typecheck" in scripts:
-        checks.append(("typecheck", "npm run typecheck --silent 2>&1", 300))
-    elif "type-check" in scripts:
-        checks.append(("typecheck", "npm run type-check --silent 2>&1", 300))
-    elif (repo / "tsconfig.json").exists():
+    def _is_check_script(name: str) -> bool:
+        n = name.lower()
+        if any(s in n for s in skip_keywords):
+            return False
+        return any(k in n for k in lint_keywords) or n in ("check", "checks")
+
+    typecheck_covered = False
+    for name in sorted(scripts):
+        if not _is_check_script(name):
+            continue
+        label = f"npm run {name}"
+        checks.append((label, f"npm run {name} --silent 2>&1", 300))
+        n = name.lower()
+        if "typecheck" in n or "type-check" in n or n in ("check", "tsc"):
+            typecheck_covered = True
+
+    # Fallback: if no script covers typechecking but tsconfig is present, run tsc.
+    if not typecheck_covered and (repo / "tsconfig.json").exists():
         checks.append(("typecheck", "npx --no-install tsc --noEmit 2>&1", 300))
 
     return checks
