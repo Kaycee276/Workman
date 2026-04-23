@@ -125,6 +125,10 @@ Finishing — read carefully:
 
 Environment:
 - Dependencies are pre-installed before you start. `node_modules`, Python packages, cargo registry etc. are ready. You may install additional dev-only packages if a verification tool is missing (e.g. `npm install --no-save <tool>`), but do not touch the committed lockfile.
+
+Scope — critical:
+- You are responsible ONLY for failures caused by your own changes. If verification surfaces failures in files/tests unrelated to what you modified, those are PRE-EXISTING issues in the repo. Do not try to fix them. Call `finish` as soon as your own changes are green, noting any pre-existing failures in the summary so a human can triage them separately.
+- Chasing every red test in a large repo is how the solver hits max iterations. Stay scoped: fix what you broke, ignore what was already broken.
 """
 
 
@@ -230,13 +234,38 @@ class IssueSolver:
         already made so it doesn't re-read the same files from scratch."""
         if not self.messages:
             raise RuntimeError("continue_after_verification called before solve()")
+
+        # List the files THIS solver pass actually changed. Used in the prompt
+        # below to keep the solver from chasing pre-existing brokenness that
+        # belongs to other commits.
+        diff = self.runner._run("git diff --name-only HEAD 2>&1", timeout=30)
+        modified_files = [
+            line.strip() for line in (diff.get("stdout") or "").splitlines() if line.strip()
+        ]
+        modified_list = "\n".join(f"  - {f}" for f in modified_files) or "  (none detected)"
+
         self.messages.append({
             "role": "user",
             "content": (
                 "The code you called `finish` on did NOT pass the pipeline's "
-                "post-finish verification gate (lint, typecheck, tests). "
-                "Below are the exact failures. Fix every one of them and call "
-                "`finish` again once all checks pass.\n\n"
+                "post-finish verification gate (lint, typecheck, tests).\n\n"
+                "Files YOU modified in this pass:\n"
+                f"{modified_list}\n\n"
+                "Scope rules — read carefully:\n"
+                "- Fix ONLY failures that are caused by your changes. A failure "
+                "is yours if it's in one of the modified files above, in a test "
+                "that imports one of those files, or in code that calls APIs "
+                "you introduced.\n"
+                "- Failures in completely unrelated files/tests are PRE-EXISTING "
+                "issues in the repository, NOT caused by your change. Do NOT "
+                "try to fix them. Leave them alone and call `finish` as soon as "
+                "your own changes pass.\n"
+                "- If every remaining failure is pre-existing, call `finish` "
+                "immediately with a summary noting which failures were pre-existing "
+                "and skipped.\n"
+                "- Chasing every red test in the repo is how the solver times "
+                "out. Stay scoped.\n\n"
+                "Verification failures:\n\n"
                 f"{verification_error}"
             ),
         })

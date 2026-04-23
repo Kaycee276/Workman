@@ -85,19 +85,19 @@ LANG_SETUP_CMDS: dict[str, list[str]] = {
     ],
     "node": [
         # Try the project's preferred package manager, fall back to npm if the
-        # preferred binary is absent. Ensures node_modules exists even when the
-        # host doesn't have pnpm/yarn/bun installed.
+        # preferred binary is absent. Each branch chains a fallback for the
+        # common failure modes (peer-dep conflicts, missing/stale lockfile)
+        # so we don't leave node_modules empty and force the solver to do
+        # setup work itself.
         (
             "if [ -f pnpm-lock.yaml ] && command -v pnpm >/dev/null; then "
-            "pnpm install --frozen-lockfile; "
+            "pnpm install --frozen-lockfile || pnpm install --no-frozen-lockfile; "
             "elif [ -f yarn.lock ] && command -v yarn >/dev/null; then "
-            "yarn install --frozen-lockfile; "
+            "yarn install --frozen-lockfile || yarn install; "
             "elif [ -f bun.lockb ] && command -v bun >/dev/null; then "
             "bun install; "
-            "elif [ -f package-lock.json ]; then "
-            "npm ci; "
             "elif [ -f package.json ]; then "
-            "npm install; "
+            "npm ci --legacy-peer-deps || npm install --legacy-peer-deps; "
             "fi"
         ),
     ],
