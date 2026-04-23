@@ -7,7 +7,7 @@ import config
 from src import state
 from src.drips.models import DripsIssue
 from src.github.client import GitHubClient
-from src.docker.manager import NativeRunner, clone_repo, detect_language, push_and_commit
+from src.docker.manager import NativeRunner, clone_repo, detect_language, detect_projects, push_and_commit
 from src.solver.agent import IssueSolver
 
 logger = logging.getLogger(__name__)
@@ -151,6 +151,73 @@ def _run_verification(runner: NativeRunner, language: str) -> str | None:
     return None
 
 
+def _modified_projects(repo_root: Path, projects: list[tuple[str, Path]]) -> list[tuple[str, Path]]:
+    """Return only the projects whose files were actually modified by the solver.
+
+    Avoids running (slow, possibly unrelated) verification on a subproject the
+    solver never touched — e.g. running `cargo test` on Soroban contracts when
+    the fix only changed the Node server. Each changed file is attributed to
+    its DEEPEST containing project so server/foo.js counts only for the Node
+    project, not also for the rust project at the repo root.
+
+    Falls back to ALL projects if git diff is unavailable.
+    """
+    runner = NativeRunner(repo_root)
+    r = runner._run("git diff --name-only HEAD 2>&1", timeout=30)
+    if r["exit_code"] != 0:
+        logger.warning(f"git diff failed ({r['exit_code']}); running verification on all projects")
+        return projects
+    changed_rel = [line.strip() for line in r["stdout"].splitlines() if line.strip()]
+    if not changed_rel:
+        return []
+
+    changed_abs = [(repo_root / p).resolve() for p in changed_rel]
+    by_depth = sorted(
+        projects, key=lambda lp: len(lp[1].resolve().parts), reverse=True
+    )
+
+    affected_keys: set[str] = set()
+    for f in changed_abs:
+        for _lang, subdir in by_depth:
+            try:
+                f.relative_to(subdir.resolve())
+            except ValueError:
+                continue
+            affected_keys.add(str(subdir.resolve()))
+            break
+
+    return [
+        (lang, subdir) for lang, subdir in projects
+        if str(subdir.resolve()) in affected_keys
+    ]
+
+
+def _run_verification_multi(
+    repo_root: Path, projects: list[tuple[str, Path]]
+) -> str | None:
+    """Run verification across every modified project. Labels each project in
+    the failure report so the solver knows which subdir to fix."""
+    targets = _modified_projects(repo_root, projects)
+    if not targets:
+        logger.info("No files modified by solver; verification gate skipped")
+        return None
+
+    failures: list[str] = []
+    for lang, subdir in targets:
+        sub_runner = NativeRunner(subdir)
+        err = _run_verification(sub_runner, lang)
+        if not err:
+            continue
+        try:
+            rel = subdir.resolve().relative_to(repo_root.resolve())
+            label = str(rel) if str(rel) != "." else "(root)"
+        except ValueError:
+            label = str(subdir)
+        failures.append(f"### Project: {label} [{lang}] ###\n{err}")
+
+    return "\n\n".join(failures) if failures else None
+
+
 def _step(issue_id: str, step: str, msg: str) -> None:
     logger.info(msg)
     state.upsert_issue(issue_id, step=step)
@@ -218,45 +285,56 @@ def run_pipeline(issue: DripsIssue) -> str:
         clone_repo(gh.get_clone_url(forked_repo), repo_path, branch=branch_name, token=config.GITHUB_TOKEN)
         state.log(iid, "Clone complete")
 
-        # 4. Setup environment natively
-        language = detect_language(repo_path)
-        _step(iid, "setup", f"Detected language: {language}. Installing dependencies...")
-        runner = NativeRunner(repo_path)
-        setup_warnings = runner.setup(language)
-        if setup_warnings:
+        # 4. Setup environment for every detected project (monorepo-aware).
+        projects = detect_projects(repo_path)
+        if not projects:
+            projects = [(detect_language(repo_path), repo_path)]
+
+        project_labels = ", ".join(
+            f"{lang} @ {subdir.relative_to(repo_path) if subdir != repo_path else '.'}"
+            for lang, subdir in projects
+        )
+        _step(iid, "setup", f"Detected projects: {project_labels}. Installing dependencies...")
+
+        all_setup_warnings: list[dict] = []
+        for lang, subdir in projects:
+            sub_runner = NativeRunner(subdir)
+            all_setup_warnings.extend(sub_runner.setup(lang))
+
+        if all_setup_warnings:
             tagged = "; ".join(
                 f"[{w.get('kind', 'UNKNOWN')}] {w.get('detail', 'no details')}"
-                for w in setup_warnings
+                for w in all_setup_warnings
             )
             state.log(iid, f"Setup complete with warnings: {tagged}")
         else:
             state.log(iid, "Setup complete")
 
-        # Preflight: abort if we can't even sanity-check a fix for this language.
-        required = _VERIFY_BINARIES.get(language)
-        if language in _REQUIRED_VERIFY and required and not shutil.which(required):
-            raise RuntimeError(
-                f"{required} not on PATH — refusing to ship an unverified {language} fix"
-            )
+        # Preflight: every required language present must have its toolchain.
+        for lang, _subdir in projects:
+            required = _VERIFY_BINARIES.get(lang)
+            if lang in _REQUIRED_VERIFY and required and not shutil.which(required):
+                raise RuntimeError(
+                    f"{required} not on PATH — refusing to ship an unverified {lang} fix"
+                )
 
         available_tools = sorted(
-            name for name in _VERIFY_BINARIES.values() if shutil.which(name)
+            {name for name in _VERIFY_BINARIES.values() if shutil.which(name)}
         )
 
-        # 5. Claude solver
+        # 5. Claude solver — rooted at repo_path; solver navigates into subdirs itself.
         _step(iid, "solving", "Claude is analyzing the issue and writing the fix...")
+        runner = NativeRunner(repo_path)
         solver = IssueSolver(runner, repo_path)
         fix_summary = solver.solve(issue.title, issue.description, available_tools=available_tools)
 
-        # 5.5. Verify the fix
+        # 5.5. Verify the fix across every modified project.
         _step(iid, "verifying", "Running verification...")
-        verification_error = _run_verification(runner, language)
+        verification_error = _run_verification_multi(repo_path, projects)
         if verification_error:
-            _step(iid, "re-solving", "Verification failed, re-analyzing with errors...")
-            issue.description += f"\n\nVerification failed. Please fix the following errors and ensure tests pass:\n{verification_error}"
-            fix_summary = solver.solve(issue.title, issue.description, available_tools=available_tools)
-            # Verify again
-            verification_error = _run_verification(runner, language)
+            _step(iid, "re-solving", "Verification failed, continuing solver with errors...")
+            fix_summary = solver.continue_after_verification(verification_error)
+            verification_error = _run_verification_multi(repo_path, projects)
             if verification_error:
                 raise RuntimeError(f"Verification failed after retry: {verification_error}")
 

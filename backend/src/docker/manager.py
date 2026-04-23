@@ -113,20 +113,57 @@ SETUP_TIMEOUT = 600
 MAX_CAPTURE_BYTES = 512 * 1024
 
 
+_LANG_INDICATORS: dict[str, list[str]] = {
+    "python": ["requirements.txt", "pyproject.toml", "setup.py", "setup.cfg"],
+    "node": ["package.json"],
+    "rust": ["Cargo.toml"],
+    "go": ["go.mod"],
+    "java": ["pom.xml", "build.gradle"],
+    "ruby": ["Gemfile"],
+    "php": ["composer.json"],
+}
+
+# Common monorepo layout: the real codebase lives in one of these subdirs
+# while the root holds workspace config, smart contracts, or tooling.
+_MONOREPO_SUBDIRS: tuple[str, ...] = (
+    "server", "backend", "api", "service", "services",
+    "client", "frontend", "web", "app",
+)
+
+
 def detect_language(repo_path: Path) -> str:
-    indicators = {
-        "python": ["requirements.txt", "pyproject.toml", "setup.py", "setup.cfg"],
-        "node": ["package.json"],
-        "rust": ["Cargo.toml"],
-        "go": ["go.mod"],
-        "java": ["pom.xml", "build.gradle"],
-        "ruby": ["Gemfile"],
-        "php": ["composer.json"],
-    }
-    for lang, files in indicators.items():
+    for lang, files in _LANG_INDICATORS.items():
         if any((repo_path / f).exists() for f in files):
             return lang
     return "default"
+
+
+def detect_projects(repo_path: Path) -> list[tuple[str, Path]]:
+    """Return every (language, path) pair found at the root and conventional
+    monorepo subdirs (server/, backend/, api/, client/, frontend/, packages/*).
+
+    Lets the pipeline set up and verify each project correctly on repos like
+    SoroMint — where Rust contracts live at the root and the Node backend
+    lives in server/. Without this, setup only runs for whichever language
+    was detected first at the root.
+    """
+    candidates: list[Path] = [repo_path]
+    for name in _MONOREPO_SUBDIRS:
+        p = repo_path / name
+        if p.is_dir():
+            candidates.append(p)
+    packages = repo_path / "packages"
+    if packages.is_dir():
+        for child in sorted(packages.iterdir()):
+            if child.is_dir():
+                candidates.append(child)
+
+    projects: list[tuple[str, Path]] = []
+    for path in candidates:
+        lang = detect_language(path)
+        if lang != "default":
+            projects.append((lang, path))
+    return projects
 
 
 class NativeRunner:

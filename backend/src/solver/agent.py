@@ -1,6 +1,7 @@
 import json
 import logging
 import shlex
+import time
 from pathlib import Path
 
 import anthropic
@@ -9,6 +10,19 @@ import config
 from src.docker.manager import NativeRunner
 
 logger = logging.getLogger(__name__)
+
+# Transient API failures we retry with backoff rather than letting them blow
+# up the whole pipeline (which would discard iterations of solver state).
+_RETRYABLE_API_ERRORS: tuple[type[Exception], ...] = (
+    anthropic.APIConnectionError,
+    anthropic.APITimeoutError,
+    anthropic.RateLimitError,
+    anthropic.InternalServerError,
+)
+if hasattr(anthropic, "OverloadedError"):
+    _RETRYABLE_API_ERRORS = _RETRYABLE_API_ERRORS + (anthropic.OverloadedError,)
+
+_API_RETRY_BACKOFF_SECONDS: tuple[int, ...] = (30, 60, 120)
 
 TOOLS = [
     {
@@ -148,28 +162,48 @@ class IssueSolver:
         self.runner = runner
         self.repo_path = repo_path
         self.model = PRIMARY_MODEL
+        # Conversation state persists across solve() / continue_after_verification()
+        # calls in the same pipeline run — so a post-finish verification retry
+        # resumes with full context instead of re-reading files from scratch.
+        self.messages: list[dict] = []
 
     def _create(self, messages: list[dict]):
-        try:
-            return self.client.messages.create(
-                model=self.model,
-                max_tokens=8096,
-                system=SYSTEM_PROMPT,
-                tools=TOOLS,
-                messages=messages,
-            )
-        except (anthropic.NotFoundError, anthropic.BadRequestError) as e:
-            if self.model != PRIMARY_MODEL:
+        attempt = 0
+        while True:
+            try:
+                return self.client.messages.create(
+                    model=self.model,
+                    max_tokens=8096,
+                    system=SYSTEM_PROMPT,
+                    tools=TOOLS,
+                    messages=messages,
+                )
+            except (anthropic.NotFoundError, anthropic.BadRequestError) as e:
+                if self.model == PRIMARY_MODEL:
+                    logger.warning(f"{self.model} unavailable ({e}); falling back to {FALLBACK_MODEL}")
+                    self.model = FALLBACK_MODEL
+                    continue
                 raise
-            logger.warning(f"{self.model} unavailable ({e}); falling back to {FALLBACK_MODEL}")
-            self.model = FALLBACK_MODEL
-            return self.client.messages.create(
-                model=self.model,
-                max_tokens=8096,
-                system=SYSTEM_PROMPT,
-                tools=TOOLS,
-                messages=messages,
-            )
+            except _RETRYABLE_API_ERRORS as e:
+                if attempt >= len(_API_RETRY_BACKOFF_SECONDS):
+                    # Exhausted retries on current model — try the fallback once
+                    # before giving up entirely.
+                    if self.model == PRIMARY_MODEL:
+                        logger.warning(
+                            f"{self.model} persistently failing ({type(e).__name__}); "
+                            f"switching to {FALLBACK_MODEL}"
+                        )
+                        self.model = FALLBACK_MODEL
+                        attempt = 0
+                        continue
+                    raise
+                wait = _API_RETRY_BACKOFF_SECONDS[attempt]
+                attempt += 1
+                logger.warning(
+                    f"API error ({type(e).__name__}) on attempt {attempt}/"
+                    f"{len(_API_RETRY_BACKOFF_SECONDS)}: {e}. Retrying in {wait}s..."
+                )
+                time.sleep(wait)
 
     def solve(
         self,
@@ -187,15 +221,35 @@ class IssueSolver:
             f"{issue_body}{tools_section}\n\n"
             "Please fix this issue. Start by exploring the repository structure."
         )
-        messages: list[dict] = [{"role": "user", "content": user_message}]
-        iterations = 0
+        self.messages = [{"role": "user", "content": user_message}]
+        return self._run_loop()
 
+    def continue_after_verification(self, verification_error: str) -> str:
+        """Continue from existing conversation after the pipeline's post-finish
+        verification gate caught failures. Preserves every tool call the solver
+        already made so it doesn't re-read the same files from scratch."""
+        if not self.messages:
+            raise RuntimeError("continue_after_verification called before solve()")
+        self.messages.append({
+            "role": "user",
+            "content": (
+                "The code you called `finish` on did NOT pass the pipeline's "
+                "post-finish verification gate (lint, typecheck, tests). "
+                "Below are the exact failures. Fix every one of them and call "
+                "`finish` again once all checks pass.\n\n"
+                f"{verification_error}"
+            ),
+        })
+        return self._run_loop()
+
+    def _run_loop(self) -> str:
+        iterations = 0
         while iterations < config.MAX_SOLVER_ITERATIONS:
             iterations += 1
             logger.info(f"Solver iteration {iterations} (model={self.model})")
 
-            response = self._create(messages)
-            messages.append({"role": "assistant", "content": response.content})
+            response = self._create(self.messages)
+            self.messages.append({"role": "assistant", "content": response.content})
 
             if response.stop_reason == "end_turn":
                 for block in response.content:
@@ -218,7 +272,7 @@ class IssueSolver:
                     summary = block.input.get("summary", "Issue fixed.")
                     logger.info(f"Solver finished: {summary}")
                     tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": "Done."})
-                    messages.append({"role": "user", "content": tool_results})
+                    self.messages.append({"role": "user", "content": tool_results})
                     return summary
 
                 result = self._dispatch(block.name, block.input)
@@ -228,8 +282,8 @@ class IssueSolver:
                     "content": result[:32000],
                 })
 
-            messages.append({"role": "user", "content": tool_results})
-            _trim_old_tool_results(messages)
+            self.messages.append({"role": "user", "content": tool_results})
+            _trim_old_tool_results(self.messages)
 
         raise RuntimeError(f"Solver hit max iterations ({config.MAX_SOLVER_ITERATIONS}) without finishing")
 
