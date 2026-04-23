@@ -39,4 +39,4 @@ ALLOWED_ORIGINS = (
     else ["http://localhost:5173", "http://localhost:3000"]
 )
 
-MAX_SOLVER_ITERATIONS = 70
+MAX_SOLVER_ITERATIONS = 90

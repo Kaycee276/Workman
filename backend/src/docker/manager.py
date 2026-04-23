@@ -44,17 +44,6 @@ _BLOCKED: list[re.Pattern] = [
     re.compile(r"\bmkfs\b"),                                     # filesystem format
 ]
 
-# Dependency installers are blocked because they OOM constrained hosts — npm
-# alone routinely spikes 300-500MB resolving node_modules. The solver is
-# expected to reason from source instead. Separate from _BLOCKED so the error
-# message can guide the model toward the right next step.
-_DEP_INSTALL_BLOCKED: list[re.Pattern] = [
-    re.compile(r"\bnpm\s+(install|i|ci|update|add)\b"),
-    re.compile(r"\byarn(\s+(install|add|upgrade))?\s*$"),
-    re.compile(r"\byarn\s+(install|add|upgrade)\b"),
-    re.compile(r"\bpnpm\s+(install|i|add|update)\b"),
-    re.compile(r"\bbun\s+(install|i|add)\b"),
-]
 
 
 def _safe_env() -> dict[str, str]:
@@ -81,37 +70,47 @@ def _check_command(command: str) -> None:
     for pattern in _BLOCKED:
         if pattern.search(command):
             raise PermissionError(f"Blocked command pattern '{pattern.pattern}': {command}")
-    for pattern in _DEP_INSTALL_BLOCKED:
-        if pattern.search(command):
-            raise PermissionError(
-                "Dependency installers are disabled on this host (memory-constrained). "
-                "Do not retry with a different flag or package manager. "
-                "Reason about the fix from source code, then call `finish`."
-            )
 
 LANG_SETUP_CMDS: dict[str, list[str]] = {
     "python": [
-        "pip install --upgrade pip -q 2>/dev/null || true",
-        "[ -f requirements.txt ] && pip install -r requirements.txt -q || true",
-        "[ -f pyproject.toml ] && pip install -e . -q 2>/dev/null || true",
-        "[ -f setup.py ] && pip install -e . -q 2>/dev/null || true",
+        "python3 -m pip install --upgrade pip -q 2>/dev/null || true",
+        "[ -f requirements.txt ] && python3 -m pip install -r requirements.txt -q || true",
+        "[ -f pyproject.toml ] && python3 -m pip install -e . -q 2>/dev/null || true",
+        "[ -f setup.py ] && python3 -m pip install -e . -q 2>/dev/null || true",
+        "[ -f pyproject.toml ] && python3 -m pip install -e '.[dev]' -q 2>/dev/null || true",
     ],
     "go": [
         "[ -f go.mod ] && go mod download 2>/dev/null || true",
     ],
-    # node and rust skipped — installs regularly blow past any reasonable timeout on
-    # constrained hosts. Solver works from source analysis for these languages.
-    "node": [],
-    "rust": [],
+    "node": [
+        # Try the project's preferred package manager, fall back to npm if the
+        # preferred binary is absent. Ensures node_modules exists even when the
+        # host doesn't have pnpm/yarn/bun installed.
+        (
+            "if [ -f pnpm-lock.yaml ] && command -v pnpm >/dev/null; then "
+            "pnpm install --frozen-lockfile; "
+            "elif [ -f yarn.lock ] && command -v yarn >/dev/null; then "
+            "yarn install --frozen-lockfile; "
+            "elif [ -f bun.lockb ] && command -v bun >/dev/null; then "
+            "bun install; "
+            "elif [ -f package-lock.json ]; then "
+            "npm ci; "
+            "elif [ -f package.json ]; then "
+            "npm install; "
+            "fi"
+        ),
+    ],
+    "rust": [
+        "[ -f Cargo.toml ] && cargo fetch 2>/dev/null || true",
+    ],
     "default": [],
 }
 
-SETUP_TIMEOUT = 180
+SETUP_TIMEOUT = 600
 
-# Cap per-stream captured output. Commands like `npm install` emit tens of MB of
-# progress noise that we'd otherwise hold fully in RAM before truncating it at
-# the solver layer. Capture to disk, read back only the tail.
-MAX_CAPTURE_BYTES = 64 * 1024
+# Cap per-stream captured output. 2GB host absorbs half-MB comfortably; this is
+# big enough for full test output but still bounds runaway progress spam.
+MAX_CAPTURE_BYTES = 512 * 1024
 
 
 def detect_language(repo_path: Path) -> str:
@@ -147,7 +146,7 @@ class NativeRunner:
       /root, chmod on system paths) before execution.
     - Working directory: cwd is always set to the repo clone path, so
       relative paths stay inside the repo.
-    - Timeout: each command is killed after 180 seconds.
+    - Timeout: each command is killed after 600 seconds.
 
     What is NOT mitigated
     ---------------------
@@ -197,7 +196,7 @@ class NativeRunner:
             return {"exit_code": 1, "stdout": "", "stderr": str(e)}
         return self._run(command)
 
-    def _run(self, command: str, timeout: int = 180) -> dict:
+    def _run(self, command: str, timeout: int = 600) -> dict:
         try:
             with tempfile.TemporaryFile() as out_f, tempfile.TemporaryFile() as err_f:
                 result = subprocess.run(

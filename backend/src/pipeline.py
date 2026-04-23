@@ -1,3 +1,4 @@
+import json
 import logging
 import shutil
 from pathlib import Path
@@ -22,27 +23,115 @@ _VERIFY_BINARIES: dict[str, str] = {
 _REQUIRED_VERIFY: frozenset[str] = frozenset({"rust", "node"})
 
 
-def _run_verification(runner: NativeRunner, language: str) -> str | None:
-    """Run verification for the language. Return error message if failed, None if passed."""
+def _node_checks(repo: Path) -> list[tuple[str, str, int]]:
+    pkg = repo / "package.json"
+    scripts: dict = {}
+    if pkg.exists():
+        try:
+            scripts = (json.loads(pkg.read_text()).get("scripts") or {})
+        except Exception:
+            scripts = {}
+
+    checks: list[tuple[str, str, int]] = []
+
+    if "test" in scripts:
+        checks.append(("test", "npm test --silent 2>&1", 900))
+
+    if "lint" in scripts:
+        checks.append(("lint", "npm run lint --silent 2>&1", 300))
+
+    if "typecheck" in scripts:
+        checks.append(("typecheck", "npm run typecheck --silent 2>&1", 300))
+    elif "type-check" in scripts:
+        checks.append(("typecheck", "npm run type-check --silent 2>&1", 300))
+    elif (repo / "tsconfig.json").exists():
+        checks.append(("typecheck", "npx --no-install tsc --noEmit 2>&1", 300))
+
+    return checks
+
+
+def _rust_checks() -> list[tuple[str, str, int]]:
+    return [
+        ("test", "cargo test --no-fail-fast 2>&1", 1500),
+        ("clippy", "cargo clippy --all-targets --all-features -- -D warnings 2>&1", 600),
+        ("fmt", "cargo fmt --all -- --check 2>&1", 60),
+    ]
+
+
+def _python_checks(repo: Path) -> list[tuple[str, str, int]]:
+    checks: list[tuple[str, str, int]] = []
+    has_tests = (
+        (repo / "tests").is_dir()
+        or any(repo.glob("test_*.py"))
+        or any(repo.glob("*_test.py"))
+    )
+    if has_tests:
+        checks.append(("pytest", "python3 -m pytest -x --no-header 2>&1", 600))
+
+    if (repo / "pyproject.toml").exists() or (repo / "ruff.toml").exists() or (repo / ".ruff.toml").exists():
+        checks.append(("ruff", "ruff check . 2>&1", 60))
+
+    if (repo / "mypy.ini").exists() or _has_mypy_config(repo):
+        checks.append(("mypy", "mypy . 2>&1", 300))
+
+    return checks
+
+
+def _has_mypy_config(repo: Path) -> bool:
+    pyproject = repo / "pyproject.toml"
+    if not pyproject.exists():
+        return False
     try:
-        if language == "python":
-            # Since deps not installed to save resources, do basic syntax check
-            result = runner._run("python -m py_compile $(find . -name '*.py' -not -path './.*' | head -20)", timeout=30)
-            if result["exit_code"] != 0:
-                return f"py_compile failed:\n{result['stdout']}\n{result['stderr']}"
-        elif language == "node":
-            # No deps installed, skip npm test
-            pass
-        elif language == "go":
-            result = runner._run("go build ./...", timeout=60)
-            if result["exit_code"] != 0:
-                return f"go build failed:\n{result['stdout']}\n{result['stderr']}"
-        elif language == "rust":
-            # No deps installed, skip cargo test
-            pass
-        # Add more languages as needed
-    except Exception as e:
-        return f"Verification error: {e}"
+        return "[tool.mypy]" in pyproject.read_text()
+    except Exception:
+        return False
+
+
+def _go_checks() -> list[tuple[str, str, int]]:
+    return [
+        ("test", "go test ./... 2>&1", 600),
+        ("vet", "go vet ./... 2>&1", 120),
+        ("build", "go build ./... 2>&1", 300),
+    ]
+
+
+def _verification_commands(repo: Path, language: str) -> list[tuple[str, str, int]]:
+    if language == "node":
+        return _node_checks(repo)
+    if language == "rust":
+        return _rust_checks()
+    if language == "python":
+        return _python_checks(repo)
+    if language == "go":
+        return _go_checks()
+    return []
+
+
+def _run_verification(runner: NativeRunner, language: str) -> str | None:
+    """Run tests, lint, and typecheck. Return aggregated failure report, or None.
+
+    Runs each applicable check sequentially. Collects failures instead of
+    short-circuiting so the solver sees the full picture on its retry pass.
+    """
+    checks = _verification_commands(runner.repo_path, language)
+    if not checks:
+        logger.info(f"No verification configured for language={language}; skipping gate")
+        return None
+
+    failures: list[str] = []
+    for label, cmd, timeout in checks:
+        logger.info(f"Verification [{label}]: {cmd}")
+        r = runner._run(cmd, timeout=timeout)
+        if r["exit_code"] != 0:
+            out = r["stdout"].strip()
+            err = r["stderr"].strip()
+            body = "\n".join(p for p in (out, err) if p)
+            failures.append(f"=== {label} failed (exit {r['exit_code']}) ===\n{body}")
+        else:
+            logger.info(f"Verification [{label}]: passed")
+
+    if failures:
+        return "\n\n".join(failures)
     return None
 
 

@@ -108,11 +108,10 @@ Finishing — read carefully:
 - If verification fails, fix the code and re-run verification.
 - Do NOT call `finish` until verification passes.
 - Do NOT after that point: add documentation, write extra test cases, chase coverage numbers, refactor the fix, or tweak unrelated files.
+- After you call `finish`, the pipeline runs lint, typecheck, and tests again as an independent gate. If that gate fails, you will be invoked a second time with the failures — so it is in your interest to run those same checks yourself first.
 
-Host restrictions (do not fight these):
-- Dependency installers are BLOCKED: `npm install`, `npm ci`, `yarn add`, `pnpm install`, `bun install`, and equivalents will fail every time. Do not attempt them.
-- If a Node/TS project is missing its `node_modules`, you cannot run tests or `tsc`. In that case, verify by careful source reading alone and call `finish`.
-- Static verification that does NOT need installed deps (grep for pattern use, reading type signatures, checking imports match exports) is still valuable — prefer that over giving up.
+Environment:
+- Dependencies are pre-installed before you start. `node_modules`, Python packages, cargo registry etc. are ready. You may install additional dev-only packages if a verification tool is missing (e.g. `npm install --no-save <tool>`), but do not touch the committed lockfile.
 """
 
 
@@ -121,7 +120,7 @@ FALLBACK_MODEL = "claude-sonnet-4-6"
 
 # Keep the last N tool-result turns verbatim; older ones are shrunk to a stub.
 # Stale tool output doesn't help the model reason and balloons memory / tokens.
-TOOL_RESULT_WINDOW = 10
+TOOL_RESULT_WINDOW = 25
 TOOL_RESULT_STUB_LEN = 120
 
 
@@ -227,7 +226,7 @@ class IssueSolver:
                 tool_results.append({
                     "type": "tool_result",
                     "tool_use_id": block.id,
-                    "content": result[:8000],
+                    "content": result[:32000],
                 })
 
             messages.append({"role": "user", "content": tool_results})
