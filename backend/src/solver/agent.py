@@ -4,25 +4,41 @@ import shlex
 import time
 from pathlib import Path
 
-import anthropic
+import google.genai as genai
+import google.genai.types as genai_types
 
 import config
 from src.docker.manager import NativeRunner
 
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Gemini client — reuses the ANTHROPIC_API_KEY env var as the Gemini API key
+# so callers only need to change the key value, not the variable name.
+# ---------------------------------------------------------------------------
+_gemini_client = genai.Client(api_key=config.ANTHROPIC_API_KEY)
+
 # Transient API failures we retry with backoff rather than letting them blow
 # up the whole pipeline (which would discard iterations of solver state).
 _RETRYABLE_API_ERRORS: tuple[type[Exception], ...] = (
-    anthropic.APIConnectionError,
-    anthropic.APITimeoutError,
-    anthropic.RateLimitError,
-    anthropic.InternalServerError,
+    Exception,   # google-genai surfaces transient errors as generic exceptions;
+                 # we filter by message in _create() for permanent ones.
 )
-if hasattr(anthropic, "OverloadedError"):
-    _RETRYABLE_API_ERRORS = _RETRYABLE_API_ERRORS + (anthropic.OverloadedError,)
 
 _API_RETRY_BACKOFF_SECONDS: tuple[int, ...] = (30, 60, 120)
+
+# ---------------------------------------------------------------------------
+# Model cascade: most capable → lighter fallbacks
+# ---------------------------------------------------------------------------
+PRIMARY_MODEL   = "gemini-3.1-pro-preview"          # most powerful (3.1 Pro)
+FALLBACK_MODELS = [
+    "gemini-3.1-pro-preview-customtools",            # same model, better tool adherence
+    "gemini-3-flash-preview",                        # fast, Pro-grade reasoning
+    "gemini-3.1-flash-lite-preview",                 # cheapest/fastest Gemini 3
+    "gemini-2.5-pro-exp-03-25",                      # last resort: proven 2.5 Pro
+    "gemini-2.5-flash",                              # reliable 2.5 workhorse
+]
+ALL_MODELS = [PRIMARY_MODEL] + FALLBACK_MODELS
 
 TOOLS = [
     {
@@ -95,6 +111,34 @@ TOOLS = [
     },
 ]
 
+# ---------------------------------------------------------------------------
+# Convert our Anthropic-style tool schemas to Gemini FunctionDeclarations
+# ---------------------------------------------------------------------------
+def _build_gemini_tools() -> list[genai_types.Tool]:
+    declarations = []
+    for t in TOOLS:
+        schema = t["input_schema"]
+        props = {}
+        for prop_name, prop_def in schema.get("properties", {}).items():
+            props[prop_name] = genai_types.Schema(
+                type=genai_types.Type.STRING,
+                description=prop_def.get("description", ""),
+            )
+        fn = genai_types.FunctionDeclaration(
+            name=t["name"],
+            description=t["description"],
+            parameters=genai_types.Schema(
+                type=genai_types.Type.OBJECT,
+                properties=props,
+                required=schema.get("required", []),
+            ),
+        )
+        declarations.append(fn)
+    return [genai_types.Tool(function_declarations=declarations)]
+
+
+_GEMINI_TOOLS = _build_gemini_tools()
+
 SYSTEM_PROMPT = """\
 You are Workman, an autonomous software engineer. You have been assigned a GitHub issue to fix.
 
@@ -131,14 +175,86 @@ Scope — critical:
 - Chasing every red test in a large repo is how the solver hits max iterations. Stay scoped: fix what you broke, ignore what was already broken.
 """
 
-
-PRIMARY_MODEL = "claude-opus-4-7"
-FALLBACK_MODEL = "claude-sonnet-4-6"
-
 # Keep the last N tool-result turns verbatim; older ones are shrunk to a stub.
-# Stale tool output doesn't help the model reason and balloons memory / tokens.
 TOOL_RESULT_WINDOW = 25
 TOOL_RESULT_STUB_LEN = 120
+
+
+# ---------------------------------------------------------------------------
+# Message format helpers
+# ---------------------------------------------------------------------------
+def _to_gemini_contents(messages: list[dict]) -> list[genai_types.Content]:
+    """Convert our internal message list to Gemini Content objects."""
+    contents = []
+    for m in messages:
+        role = "user" if m["role"] == "user" else "model"
+        raw = m["content"]
+
+        # Plain string (initial user prompt)
+        if isinstance(raw, str):
+            contents.append(genai_types.Content(role=role, parts=[genai_types.Part(text=raw)]))
+            continue
+
+        # List of blocks (tool_use / tool_result / text)
+        parts = []
+        for block in raw:
+            if isinstance(block, str):
+                parts.append(genai_types.Part(text=block))
+                continue
+            if not isinstance(block, dict):
+                # Gemini SDK response objects (assistant turn) — convert via their dict repr
+                block_dict = block if isinstance(block, dict) else vars(block)
+                _extract_parts_from_sdk_block(block_dict, parts)
+                continue
+
+            btype = block.get("type")
+            if btype == "tool_result":
+                parts.append(
+                    genai_types.Part(
+                        function_response=genai_types.FunctionResponse(
+                            name=block.get("name", block.get("tool_use_id", "unknown")),
+                            response={"result": block.get("content", "")},
+                        )
+                    )
+                )
+            elif btype == "tool_use":
+                parts.append(
+                    genai_types.Part(
+                        function_call=genai_types.FunctionCall(
+                            name=block["name"],
+                            args=block.get("input", {}),
+                        )
+                    )
+                )
+            elif btype == "text":
+                parts.append(genai_types.Part(text=block.get("text", "")))
+
+        if parts:
+            contents.append(genai_types.Content(role=role, parts=parts))
+
+    return contents
+
+
+def _extract_parts_from_sdk_block(block: dict, parts: list) -> None:
+    """Handle Gemini SDK response Content/Part objects stored in messages."""
+    if "text" in block:
+        parts.append(genai_types.Part(text=block["text"]))
+    elif "function_call" in block:
+        fc = block["function_call"]
+        parts.append(
+            genai_types.Part(
+                function_call=genai_types.FunctionCall(
+                    name=fc.get("name", ""), args=fc.get("args", {})
+                )
+            )
+        )
+
+
+def _is_permanent_error(e: Exception) -> bool:
+    """Return True for errors that should NOT be retried (auth, quota exhausted, bad request)."""
+    msg = str(e).lower()
+    permanent_keywords = ("api_key", "invalid", "permission", "not found", "quota", "billing")
+    return any(k in msg for k in permanent_keywords)
 
 
 def _trim_old_tool_results(messages: list[dict]) -> None:
@@ -162,42 +278,56 @@ def _trim_old_tool_results(messages: list[dict]) -> None:
 
 class IssueSolver:
     def __init__(self, runner: NativeRunner, repo_path: Path):
-        self.client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
         self.runner = runner
         self.repo_path = repo_path
-        self.model = PRIMARY_MODEL
+        self._model_index = 0  # index into ALL_MODELS
         # Conversation state persists across solve() / continue_after_verification()
-        # calls in the same pipeline run — so a post-finish verification retry
-        # resumes with full context instead of re-reading files from scratch.
         self.messages: list[dict] = []
 
-    def _create(self, messages: list[dict]):
+    @property
+    def model(self) -> str:
+        return ALL_MODELS[self._model_index]
+
+    def _next_model(self) -> bool:
+        """Advance to the next fallback model. Returns False if exhausted."""
+        if self._model_index + 1 >= len(ALL_MODELS):
+            return False
+        self._model_index += 1
+        logger.warning(f"Falling back to model: {self.model}")
+        return True
+
+    def _create(self, messages: list[dict]) -> genai_types.GenerateContentResponse:
+        contents = _to_gemini_contents(messages)
+        config_obj = genai_types.GenerateContentConfig(
+            system_instruction=SYSTEM_PROMPT,
+            tools=_GEMINI_TOOLS,
+            max_output_tokens=8096,
+            temperature=1.0,
+        )
+
         attempt = 0
         while True:
             try:
-                return self.client.messages.create(
+                return _gemini_client.models.generate_content(
                     model=self.model,
-                    max_tokens=8096,
-                    system=SYSTEM_PROMPT,
-                    tools=TOOLS,
-                    messages=messages,
+                    contents=contents,
+                    config=config_obj,
                 )
-            except (anthropic.NotFoundError, anthropic.BadRequestError) as e:
-                if self.model == PRIMARY_MODEL:
-                    logger.warning(f"{self.model} unavailable ({e}); falling back to {FALLBACK_MODEL}")
-                    self.model = FALLBACK_MODEL
-                    continue
-                raise
-            except _RETRYABLE_API_ERRORS as e:
+            except Exception as e:
+                if _is_permanent_error(e):
+                    raise
+
+                # Model-level failure (404, unavailable) → try next model first
+                msg = str(e).lower()
+                if any(k in msg for k in ("not found", "unavailable", "deprecated")):
+                    if self._next_model():
+                        attempt = 0
+                        continue
+                    raise
+
+                # Transient error → backoff / retry
                 if attempt >= len(_API_RETRY_BACKOFF_SECONDS):
-                    # Exhausted retries on current model — try the fallback once
-                    # before giving up entirely.
-                    if self.model == PRIMARY_MODEL:
-                        logger.warning(
-                            f"{self.model} persistently failing ({type(e).__name__}); "
-                            f"switching to {FALLBACK_MODEL}"
-                        )
-                        self.model = FALLBACK_MODEL
+                    if self._next_model():
                         attempt = 0
                         continue
                     raise
@@ -224,6 +354,114 @@ class IssueSolver:
             f"# Issue: {issue_title}\n\n"
             f"{issue_body}{tools_section}\n\n"
             "Please fix this issue. Start by exploring the repository structure."
+        )
+        self.messages = [{"role": "user", "content": user_message}]
+        return self._run_loop()
+
+    def continue_after_verification(self, verification_error: str) -> str:
+        """Continue from existing conversation after the pipeline's post-finish
+        verification gate caught failures."""
+        if not self.messages:
+            raise RuntimeError("continue_after_verification called before solve()")
+
+        diff = self.runner._run("git diff --name-only HEAD 2>&1", timeout=30)
+        modified_files = [
+            line.strip() for line in (diff.get("stdout") or "").splitlines() if line.strip()
+        ]
+        modified_list = "\n".join(f"  - {f}" for f in modified_files) or "  (none detected)"
+
+        self.messages.append({
+            "role": "user",
+            "content": (
+                "The code you called `finish` on did NOT pass the pipeline's "
+                "post-finish verification gate (lint, typecheck, tests).\n\n"
+                "Files YOU modified in this pass:\n"
+                f"{modified_list}\n\n"
+                "Scope rules — read carefully:\n"
+                "- Fix ONLY failures that are caused by your changes. A failure "
+                "is yours if it's in one of the modified files above, in a test "
+                "that imports one of those files, or in code that calls APIs "
+                "you introduced.\n"
+                "- Failures in completely unrelated files/tests are PRE-EXISTING "
+                "issues in the repository, NOT caused by your change. Do NOT "
+                "try to fix them. Leave them alone and call `finish` as soon as "
+                "your own changes pass.\n"
+                "- If every remaining failure is pre-existing, call `finish` "
+                "immediately with a summary noting which failures were pre-existing "
+                "and skipped.\n"
+                "- Chasing every red test in the repo is how the solver times "
+                "out. Stay scoped.\n\n"
+                "Verification failures:\n\n"
+                f"{verification_error}"
+            ),
+        })
+        return self._run_loop(max_seconds=300)
+
+    def _run_loop(self, max_seconds: int | None = None) -> str:
+        iterations = 0
+        deadline = time.monotonic() + max_seconds if max_seconds else None
+
+        while iterations < config.MAX_SOLVER_ITERATIONS:
+            if deadline is not None and time.monotonic() >= deadline:
+                logger.warning(
+                    f"Solver wall-clock budget ({max_seconds}s) exceeded at "
+                    f"iteration {iterations}; returning partial fix"
+                )
+                return (
+                    "(partial) Time budget exceeded while addressing verification "
+                    "failures — current changes will be pushed for CI to evaluate."
+                )
+            iterations += 1
+            logger.info(f"Solver iteration {iterations} (model={self.model})")
+
+            response = self._create(self.messages)
+            candidate = response.candidates[0]
+            content = candidate.content  # genai_types.Content
+
+            # Store assistant turn as a list of serialisable dicts
+            assistant_blocks = []
+            for part in content.parts:
+                if part.text:
+                    assistant_blocks.append({"type": "text", "text": part.text})
+                elif part.function_call:
+                    assistant_blocks.append({
+                        "type": "tool_use",
+                        "name": part.function_call.name,
+                        "input": dict(part.function_call.args),
+                        # Gemini has no per-call ID; use name as stable key
+                        "id": part.function_call.name,
+                    })
+            self.messages.append({"role": "assistant", "content": assistant_blocks})
+
+            # Check finish reason
+            finish_reason = candidate.finish_reason
+            has_function_calls = any(p.function_call for p in content.parts)
+
+            if not has_function_calls:
+                # Model responded with text only → treat as end_turn
+                for block in assistant_blocks:
+                    if block.get("type") == "text" and block.get("text"):
+                        return block["text"]
+                return "Fix completed."
+
+            # Process tool calls
+            tool_results = []
+            for part in content.parts:
+                if not part.function_call:
+                    continue
+
+                fc = part.function_call
+                name = fc.name
+                inp = dict(fc.args)
+
+                logger.info(f"Tool: {name}({json.dumps(inp)[:120]})")
+
+                if name == "finish":
+                    summary = inp.get("summary", "Issue fixed.")
+                    logger.info(f"Solver finished: {summary}")
+                    tool_results.append({
+                        "type": "tool_result",
+         tart by exploring the repository structure."
         )
         self.messages = [{"role": "user", "content": user_message}]
         return self._run_loop()
