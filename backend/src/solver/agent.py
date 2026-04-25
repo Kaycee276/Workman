@@ -35,8 +35,7 @@ _API_RETRY_BACKOFF_SECONDS: tuple[int, ...] = (30, 60, 120)
 # ---------------------------------------------------------------------------
 GROQ_MODELS = [
     "llama-3.3-70b-versatile",
-    "llama-3.1-405b-reasoning",
-    "mixtral-8x7b-32768",
+    "gemma2-9b-it",
     "llama-3.1-8b-instant",
 ]
 GEMINI_MODELS = [
@@ -615,6 +614,19 @@ class IssueSolver:
                 logger.info(f"Tool: {name}({json.dumps(inp)[:120]})")
 
                 if name == "finish":
+                    # Safeguard: prevent finishing without any write_file calls
+                    # unless it's the very first iteration (unlikely to be a fix then).
+                    writes = [m for m in self.messages if m["role"] == "assistant" and any(b.get("name") == "write_file" for b in m["content"] if isinstance(b, dict))]
+                    if not writes and iterations > 1:
+                        logger.warning("Solver attempted to finish without making any file changes. Rejecting finish.")
+                        tool_results.append({
+                            "type": "tool_result",
+                            "name": name,
+                            "content": "ERROR: You are attempting to finish without having modified any files. Please actually implement the fix using write_file before calling finish.",
+                            "tool_use_id": block.get("id"),
+                        })
+                        continue
+
                     summary = inp.get("summary", "Issue fixed.")
                     logger.info(f"Solver finished: {summary}")
                     tool_results.append({
