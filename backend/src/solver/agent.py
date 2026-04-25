@@ -251,9 +251,9 @@ def _extract_parts_from_sdk_block(block: dict, parts: list) -> None:
 
 
 def _is_permanent_error(e: Exception) -> bool:
-    """Return True for errors that should NOT be retried (auth, quota exhausted, bad request)."""
+    """Return True for errors that should NOT be retried (auth, invalid request)."""
     msg = str(e).lower()
-    permanent_keywords = ("api_key", "invalid", "permission", "not found", "quota", "billing")
+    permanent_keywords = ("api_key", "invalid", "permission", "not found", "billing")
     return any(k in msg for k in permanent_keywords)
 
 
@@ -317,9 +317,13 @@ class IssueSolver:
                 if _is_permanent_error(e):
                     raise
 
-                # Model-level failure (404, unavailable) → try next model first
+                # Model-level failure (404, unavailable) OR Quota exhaustion (429)
+                # -> try next model in cascade
                 msg = str(e).lower()
-                if any(k in msg for k in ("not found", "unavailable", "deprecated")):
+                is_quota = "quota" in msg or "429" in msg
+                is_not_found = any(k in msg for k in ("not found", "unavailable", "deprecated"))
+
+                if is_quota or is_not_found:
                     if self._next_model():
                         attempt = 0
                         continue
