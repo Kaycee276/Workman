@@ -35,9 +35,8 @@ _API_RETRY_BACKOFF_SECONDS: tuple[int, ...] = (30, 60, 120)
 # ---------------------------------------------------------------------------
 GROQ_MODELS = [
     "llama-3.3-70b-versatile",
-    "llama-3.2-90b-vision-preview",
-    "llama-3.2-11b-vision-preview",
-    "llama3-70b-8192",
+    "mixtral-8x7b-32768",
+    "llama-3.1-8b-instant",
 ]
 GEMINI_MODELS = [
     "gemini-3.1-pro-preview",
@@ -376,7 +375,8 @@ class IssueSolver:
         if self._model_index + 1 >= len(ALL_MODELS):
             return False
         self._model_index += 1
-        logger.warning(f"Falling back to model: {self.model}")
+        model_name = ALL_MODELS[self._model_index]
+        logger.warning(f"Falling back to next model: {model_name} (index {self._model_index}/{len(ALL_MODELS)-1})")
         return True
 
     def _create(self, messages: list[dict]):
