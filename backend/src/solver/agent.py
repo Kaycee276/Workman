@@ -461,101 +461,16 @@ class IssueSolver:
                     logger.info(f"Solver finished: {summary}")
                     tool_results.append({
                         "type": "tool_result",
-         tart by exploring the repository structure."
-        )
-        self.messages = [{"role": "user", "content": user_message}]
-        return self._run_loop()
-
-    def continue_after_verification(self, verification_error: str) -> str:
-        """Continue from existing conversation after the pipeline's post-finish
-        verification gate caught failures. Preserves every tool call the solver
-        already made so it doesn't re-read the same files from scratch."""
-        if not self.messages:
-            raise RuntimeError("continue_after_verification called before solve()")
-
-        # List the files THIS solver pass actually changed. Used in the prompt
-        # below to keep the solver from chasing pre-existing brokenness that
-        # belongs to other commits.
-        diff = self.runner._run("git diff --name-only HEAD 2>&1", timeout=30)
-        modified_files = [
-            line.strip() for line in (diff.get("stdout") or "").splitlines() if line.strip()
-        ]
-        modified_list = "\n".join(f"  - {f}" for f in modified_files) or "  (none detected)"
-
-        self.messages.append({
-            "role": "user",
-            "content": (
-                "The code you called `finish` on did NOT pass the pipeline's "
-                "post-finish verification gate (lint, typecheck, tests).\n\n"
-                "Files YOU modified in this pass:\n"
-                f"{modified_list}\n\n"
-                "Scope rules — read carefully:\n"
-                "- Fix ONLY failures that are caused by your changes. A failure "
-                "is yours if it's in one of the modified files above, in a test "
-                "that imports one of those files, or in code that calls APIs "
-                "you introduced.\n"
-                "- Failures in completely unrelated files/tests are PRE-EXISTING "
-                "issues in the repository, NOT caused by your change. Do NOT "
-                "try to fix them. Leave them alone and call `finish` as soon as "
-                "your own changes pass.\n"
-                "- If every remaining failure is pre-existing, call `finish` "
-                "immediately with a summary noting which failures were pre-existing "
-                "and skipped.\n"
-                "- Chasing every red test in the repo is how the solver times "
-                "out. Stay scoped.\n\n"
-                "Verification failures:\n\n"
-                f"{verification_error}"
-            ),
-        })
-        return self._run_loop(max_seconds=300)
-
-    def _run_loop(self, max_seconds: int | None = None) -> str:
-        iterations = 0
-        deadline = time.monotonic() + max_seconds if max_seconds else None
-        while iterations < config.MAX_SOLVER_ITERATIONS:
-            if deadline is not None and time.monotonic() >= deadline:
-                logger.warning(
-                    f"Solver wall-clock budget ({max_seconds}s) exceeded at "
-                    f"iteration {iterations}; returning partial fix"
-                )
-                return (
-                    "(partial) Time budget exceeded while addressing verification "
-                    "failures — current changes will be pushed for CI to evaluate."
-                )
-            iterations += 1
-            logger.info(f"Solver iteration {iterations} (model={self.model})")
-
-            response = self._create(self.messages)
-            self.messages.append({"role": "assistant", "content": response.content})
-
-            if response.stop_reason == "end_turn":
-                for block in response.content:
-                    if hasattr(block, "text"):
-                        return block.text
-                return "Fix completed."
-
-            if response.stop_reason != "tool_use":
-                logger.warning(f"Unexpected stop reason: {response.stop_reason}")
-                break
-
-            tool_results = []
-            for block in response.content:
-                if block.type != "tool_use":
-                    continue
-
-                logger.info(f"Tool: {block.name}({json.dumps(block.input)[:120]})")
-
-                if block.name == "finish":
-                    summary = block.input.get("summary", "Issue fixed.")
-                    logger.info(f"Solver finished: {summary}")
-                    tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": "Done."})
+                        "name": name,
+                        "content": "Done.",
+                    })
                     self.messages.append({"role": "user", "content": tool_results})
                     return summary
 
-                result = self._dispatch(block.name, block.input)
+                result = self._dispatch(name, inp)
                 tool_results.append({
                     "type": "tool_result",
-                    "tool_use_id": block.id,
+                    "name": name,
                     "content": result[:32000],
                 })
 
