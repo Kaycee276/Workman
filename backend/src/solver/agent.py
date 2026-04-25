@@ -6,6 +6,7 @@ from pathlib import Path
 
 import google.genai as genai
 import google.genai.types as genai_types
+from groq import Groq
 
 import config
 from src.docker.manager import NativeRunner
@@ -13,10 +14,12 @@ from src.docker.manager import NativeRunner
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Gemini client — reuses the ANTHROPIC_API_KEY env var as the Gemini API key
-# so callers only need to change the key value, not the variable name.
+# API Clients
 # ---------------------------------------------------------------------------
 _gemini_client = genai.Client(api_key=config.ANTHROPIC_API_KEY)
+_groq_client = None
+if config.GROQ_API_KEY:
+    _groq_client = Groq(api_key=config.GROQ_API_KEY)
 
 # Transient API failures we retry with backoff rather than letting them blow
 # up the whole pipeline (which would discard iterations of solver state).
@@ -28,20 +31,25 @@ _RETRYABLE_API_ERRORS: tuple[type[Exception], ...] = (
 _API_RETRY_BACKOFF_SECONDS: tuple[int, ...] = (30, 60, 120)
 
 # ---------------------------------------------------------------------------
-# Model cascade: most capable → lighter fallbacks
+# Model cascade: Groq (Llama 3) -> Gemini
 # ---------------------------------------------------------------------------
-PRIMARY_MODEL   = "gemini-3.1-pro-preview"          # most powerful (3.1 Pro)
-FALLBACK_MODELS = [
-    "gemini-3.1-pro-preview-customtools",            # same model, better tool adherence
-    "gemini-3-flash-preview",                        # fast, Pro-grade reasoning
-    "gemini-3.1-flash-lite-preview",                 # cheapest/fastest Gemini 3
-    "gemini-2.5-pro-exp-03-25",                      # last resort: proven 2.5 Pro
-    "gemini-2.5-flash",                              # reliable 2.5 workhorse
-    "gemini-1.5-pro",                                # stable 1.5 Pro (highly reliable)
-    "gemini-1.5-flash",                              # stable 1.5 Flash (fastest/cheapest)
-    "gemini-1.5-flash-8b",                           # tiny but capable (ultimate fallback)
+GROQ_MODELS = [
+    "llama-3.3-70b-versatile",
+    "llama-3.1-70b-versatile",
 ]
-ALL_MODELS = [PRIMARY_MODEL] + FALLBACK_MODELS
+GEMINI_MODELS = [
+    "gemini-3.1-pro-preview",
+    "gemini-3.1-pro-preview-customtools",
+    "gemini-3-flash-preview",
+    "gemini-3.1-flash-lite-preview",
+    "gemini-2.5-pro-exp-03-25",
+    "gemini-2.5-flash",
+    "gemini-1.5-pro",
+    "gemini-1.5-flash",
+    "gemini-1.5-flash-8b",
+]
+
+ALL_MODELS = (GROQ_MODELS if _groq_client else []) + GEMINI_MODELS
 
 TOOLS = [
     {
@@ -142,6 +150,23 @@ def _build_gemini_tools() -> list[genai_types.Tool]:
 
 _GEMINI_TOOLS = _build_gemini_tools()
 
+
+def _build_groq_tools() -> list[dict]:
+    groq_tools = []
+    for t in TOOLS:
+        groq_tools.append({
+            "type": "function",
+            "function": {
+                "name": t["name"],
+                "description": t["description"],
+                "parameters": t["input_schema"],
+            },
+        })
+    return groq_tools
+
+
+_GROQ_TOOLS = _build_groq_tools()
+
 SYSTEM_PROMPT = """\
 You are Workman, an autonomous software engineer. You have been assigned a GitHub issue to fix.
 
@@ -238,6 +263,59 @@ def _to_gemini_contents(messages: list[dict]) -> list[genai_types.Content]:
     return contents
 
 
+def _to_groq_messages(messages: list[dict]) -> list[dict]:
+    """Convert our internal message list to Groq (OpenAI-compatible) format."""
+    groq_msgs = []
+    for m in messages:
+        role = m["role"]
+        raw = m["content"]
+
+        if isinstance(raw, str):
+            groq_msgs.append({"role": role, "content": raw})
+            continue
+
+        # Assistant turn with tool calls or complex blocks
+        if role == "assistant":
+            text = ""
+            tool_calls = []
+            for block in raw:
+                if isinstance(block, str):
+                    text += block
+                elif isinstance(block, dict):
+                    if block.get("type") == "text":
+                        text += block.get("text", "")
+                    elif block.get("type") == "tool_use":
+                        tool_calls.append({
+                            "id": block.get("id", block["name"]),
+                            "type": "function",
+                            "function": {
+                                "name": block["name"],
+                                "arguments": json.dumps(block["input"]),
+                            },
+                        })
+            msg = {"role": "assistant"}
+            if text:
+                msg["content"] = text
+            if tool_calls:
+                msg["tool_calls"] = tool_calls
+            groq_msgs.append(msg)
+
+        # User turn with tool results
+        elif role == "user":
+            content = []
+            for block in raw:
+                if isinstance(block, str):
+                    groq_msgs.append({"role": "user", "content": block})
+                elif isinstance(block, dict) and block.get("type") == "tool_result":
+                    groq_msgs.append({
+                        "role": "tool",
+                        "tool_call_id": block.get("tool_use_id", block.get("name", "unknown")),
+                        "name": block.get("name", "unknown"),
+                        "content": str(block.get("content", "")),
+                    })
+    return groq_msgs
+
+
 def _extract_parts_from_sdk_block(block: dict, parts: list) -> None:
     """Handle Gemini SDK response Content/Part objects stored in messages."""
     if "text" in block:
@@ -299,7 +377,45 @@ class IssueSolver:
         logger.warning(f"Falling back to model: {self.model}")
         return True
 
-    def _create(self, messages: list[dict]) -> genai_types.GenerateContentResponse:
+    def _create(self, messages: list[dict]):
+        if self.model in GROQ_MODELS:
+            return self._create_groq(messages)
+        return self._create_gemini(messages)
+
+    def _create_groq(self, messages: list[dict]):
+        groq_msgs = _to_groq_messages(messages)
+        attempt = 0
+        while True:
+            try:
+                return _groq_client.chat.completions.create(
+                    model=self.model,
+                    messages=[{"role": "system", "content": SYSTEM_PROMPT}] + groq_msgs,
+                    tools=_GROQ_TOOLS,
+                    tool_choice="auto",
+                    temperature=0.7,
+                )
+            except Exception as e:
+                msg = str(e).lower()
+                status_code = getattr(e, "status_code", 0)
+                logger.debug(f"Groq API Error (model={self.model}): {e}")
+
+                if "rate limit" in msg or "429" in msg or status_code == 429:
+                    if self._next_model():
+                        attempt = 0
+                        return self._create(messages)
+                    raise
+
+                if attempt >= len(_API_RETRY_BACKOFF_SECONDS):
+                    if self._next_model():
+                        attempt = 0
+                        return self._create(messages)
+                    raise
+                wait = _API_RETRY_BACKOFF_SECONDS[attempt]
+                attempt += 1
+                logger.warning(f"Groq retry {attempt} in {wait}s: {e}")
+                time.sleep(wait)
+
+    def _create_gemini(self, messages: list[dict]) -> genai_types.GenerateContentResponse:
         contents = _to_gemini_contents(messages)
         config_obj = genai_types.GenerateContentConfig(
             system_instruction=SYSTEM_PROMPT,
@@ -426,27 +542,41 @@ class IssueSolver:
             logger.info(f"Solver iteration {iterations} (model={self.model})")
 
             response = self._create(self.messages)
-            candidate = response.candidates[0]
-            content = candidate.content  # genai_types.Content
 
             # Store assistant turn as a list of serialisable dicts
             assistant_blocks = []
-            for part in content.parts:
-                if part.text:
-                    assistant_blocks.append({"type": "text", "text": part.text})
-                elif part.function_call:
-                    assistant_blocks.append({
-                        "type": "tool_use",
-                        "name": part.function_call.name,
-                        "input": dict(part.function_call.args),
-                        # Gemini has no per-call ID; use name as stable key
-                        "id": part.function_call.name,
-                    })
-            self.messages.append({"role": "assistant", "content": assistant_blocks})
+            has_function_calls = False
 
-            # Check finish reason
-            finish_reason = candidate.finish_reason
-            has_function_calls = any(p.function_call for p in content.parts)
+            if self.model in GROQ_MODELS:
+                msg = response.choices[0].message
+                if msg.content:
+                    assistant_blocks.append({"type": "text", "text": msg.content})
+                if msg.tool_calls:
+                    has_function_calls = True
+                    for tc in msg.tool_calls:
+                        assistant_blocks.append({
+                            "type": "tool_use",
+                            "name": tc.function.name,
+                            "input": json.loads(tc.function.arguments),
+                            "id": tc.id,
+                        })
+            else:
+                candidate = response.candidates[0]
+                content = candidate.content  # genai_types.Content
+                for part in content.parts:
+                    if part.text:
+                        assistant_blocks.append({"type": "text", "text": part.text})
+                    elif part.function_call:
+                        has_function_calls = True
+                        assistant_blocks.append({
+                            "type": "tool_use",
+                            "name": part.function_call.name,
+                            "input": dict(part.function_call.args),
+                            # Gemini has no per-call ID; use name as stable key
+                            "id": part.function_call.name,
+                        })
+
+            self.messages.append({"role": "assistant", "content": assistant_blocks})
 
             if not has_function_calls:
                 # Model responded with text only → treat as end_turn
@@ -457,13 +587,12 @@ class IssueSolver:
 
             # Process tool calls
             tool_results = []
-            for part in content.parts:
-                if not part.function_call:
+            for block in assistant_blocks:
+                if block.get("type") != "tool_use":
                     continue
 
-                fc = part.function_call
-                name = fc.name
-                inp = dict(fc.args)
+                name = block["name"]
+                inp = block["input"]
 
                 logger.info(f"Tool: {name}({json.dumps(inp)[:120]})")
 
@@ -474,6 +603,7 @@ class IssueSolver:
                         "type": "tool_result",
                         "name": name,
                         "content": "Done.",
+                        "tool_use_id": block.get("id"),
                     })
                     self.messages.append({"role": "user", "content": tool_results})
                     return summary
@@ -483,6 +613,7 @@ class IssueSolver:
                     "type": "tool_result",
                     "name": name,
                     "content": result[:32000],
+                    "tool_use_id": block.get("id"),
                 })
 
             self.messages.append({"role": "user", "content": tool_results})

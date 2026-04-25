@@ -8,6 +8,7 @@ load_dotenv()
 GITHUB_TOKEN      = os.getenv("GITHUB_TOKEN")
 GITHUB_USERNAME   = os.getenv("GITHUB_USERNAME")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
+GROQ_API_KEY      = os.getenv("GROQ_API_KEY")
 
 POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "300"))
 
