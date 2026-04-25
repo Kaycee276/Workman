@@ -37,6 +37,8 @@ FALLBACK_MODELS = [
     "gemini-3.1-flash-lite-preview",                 # cheapest/fastest Gemini 3
     "gemini-2.5-pro-exp-03-25",                      # last resort: proven 2.5 Pro
     "gemini-2.5-flash",                              # reliable 2.5 workhorse
+    "gemini-1.5-pro",                                # stable 1.5 Pro (highly reliable)
+    "gemini-1.5-flash",                              # stable 1.5 Flash (fastest/cheapest)
 ]
 ALL_MODELS = [PRIMARY_MODEL] + FALLBACK_MODELS
 
@@ -320,7 +322,7 @@ class IssueSolver:
                 # Model-level failure (404, unavailable) OR Quota exhaustion (429)
                 # -> try next model in cascade
                 msg = str(e).lower()
-                is_quota = "quota" in msg or "429" in msg
+                is_quota = "quota" in msg or "429" in msg or getattr(e, "status_code", 0) == 429
                 is_not_found = any(k in msg for k in ("not found", "unavailable", "deprecated"))
 
                 if is_quota or is_not_found:
