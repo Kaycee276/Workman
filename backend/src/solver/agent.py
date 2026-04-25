@@ -35,7 +35,9 @@ _API_RETRY_BACKOFF_SECONDS: tuple[int, ...] = (30, 60, 120)
 # ---------------------------------------------------------------------------
 GROQ_MODELS = [
     "llama-3.3-70b-versatile",
-    "llama-3.1-70b-versatile",
+    "llama-3.2-90b-vision-preview",
+    "llama-3.2-11b-vision-preview",
+    "llama3-70b-8192",
 ]
 GEMINI_MODELS = [
     "gemini-3.1-pro-preview",
@@ -399,7 +401,11 @@ class IssueSolver:
                 status_code = getattr(e, "status_code", 0)
                 logger.debug(f"Groq API Error (model={self.model}): {e}")
 
-                if "rate limit" in msg or "429" in msg or status_code == 429:
+                is_quota = "rate limit" in msg or "429" in msg or status_code == 429
+                is_invalid = any(k in msg for k in ("decommissioned", "not found", "unavailable", "deprecated", "400"))
+
+                if is_quota or is_invalid:
+                    logger.warning(f"Groq model {self.model} {'hit quota' if is_quota else 'is unavailable'}. Falling back...")
                     if self._next_model():
                         attempt = 0
                         return self._create(messages)
