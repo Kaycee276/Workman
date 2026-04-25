@@ -35,6 +35,7 @@ _API_RETRY_BACKOFF_SECONDS: tuple[int, ...] = (30, 60, 120)
 # ---------------------------------------------------------------------------
 GROQ_MODELS = [
     "llama-3.3-70b-versatile",
+    "llama-3.1-405b-reasoning",
     "mixtral-8x7b-32768",
     "llama-3.1-8b-instant",
 ]
@@ -403,6 +404,17 @@ class IssueSolver:
 
                 is_quota = "rate limit" in msg or "429" in msg or status_code == 429
                 is_invalid = any(k in msg for k in ("decommissioned", "not found", "unavailable", "deprecated", "400"))
+                is_forbidden = "403" in msg or status_code == 403
+
+                if is_forbidden:
+                    logger.error(f"Groq access denied (403). Possible IP block. Skipping Groq cascade.")
+                    # Skip all remaining Groq models by jumping to the first Gemini model
+                    gemini_start_index = len(GROQ_MODELS)
+                    if self._model_index < gemini_start_index:
+                        self._model_index = gemini_start_index - 1 # _next_model will increment it
+                    if self._next_model():
+                        return self._create(messages)
+                    raise
 
                 if is_quota or is_invalid:
                     logger.warning(f"Groq model {self.model} {'hit quota' if is_quota else 'is unavailable'}. Falling back...")
