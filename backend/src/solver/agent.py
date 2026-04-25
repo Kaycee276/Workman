@@ -39,6 +39,7 @@ FALLBACK_MODELS = [
     "gemini-2.5-flash",                              # reliable 2.5 workhorse
     "gemini-1.5-pro",                                # stable 1.5 Pro (highly reliable)
     "gemini-1.5-flash",                              # stable 1.5 Flash (fastest/cheapest)
+    "gemini-1.5-flash-8b",                           # tiny but capable (ultimate fallback)
 ]
 ALL_MODELS = [PRIMARY_MODEL] + FALLBACK_MODELS
 
@@ -319,16 +320,20 @@ class IssueSolver:
                 if _is_permanent_error(e):
                     raise
 
-                # Model-level failure (404, unavailable) OR Quota exhaustion (429)
-                # -> try next model in cascade
+                # Log the error for easier debugging
                 msg = str(e).lower()
-                is_quota = "quota" in msg or "429" in msg or getattr(e, "status_code", 0) == 429
+                status_code = getattr(e, "status_code", 0)
+                logger.debug(f"API Error (model={self.model}, code={status_code}): {e}")
+
+                is_quota = "quota" in msg or "429" in msg or status_code == 429
                 is_not_found = any(k in msg for k in ("not found", "unavailable", "deprecated"))
 
                 if is_quota or is_not_found:
+                    logger.info(f"Model {self.model} hit {'quota' if is_quota else 'availability'} limit. Trying next model...")
                     if self._next_model():
                         attempt = 0
                         continue
+                    logger.error("All models in cascade exhausted.")
                     raise
 
                 # Transient error → backoff / retry
